@@ -2,8 +2,7 @@ import logging
 import sys
 
 from fastmcp import FastMCP
-
-from .api_client import request_psx_api
+from mcp_server.api_client import request_psx_api
 
 
 # =========================================================
