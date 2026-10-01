@@ -1,0 +1,7 @@
+streamlit
+openai
+mcp[cli]
+python-dotenv
+anyio
+httpx
+fastmcp
