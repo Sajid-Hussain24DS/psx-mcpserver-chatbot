@@ -2,8 +2,11 @@ import logging
 import sys
 
 from fastmcp import FastMCP
-from mcp_server.api_client import request_psx_api
 
+try:
+    from mcp_server.api_client import request_psx_api
+except ModuleNotFoundError:
+    from api_client import request_psx_api
 
 # =========================================================
 # Logging
