@@ -1,6 +1,4 @@
-# =========================================================
-# Ranking formatter
-# =========================================================
+
 
 def format_ranking_result(
     tool_name: str,
@@ -141,9 +139,6 @@ def format_ranking_result(
     return "\n".join(lines)
 
 
-# =========================================================
-# Ranking follow-up
-# =========================================================
 
 def answer_ranking_followup(
     user_question: str,
@@ -196,9 +191,6 @@ def answer_ranking_followup(
         )
 
 
-    # -----------------------------------------------------
-    # Lowest trading volume
-    # -----------------------------------------------------
 
     if (
         tool_name == "get_bottom_volume"
@@ -234,9 +226,6 @@ def answer_ranking_followup(
         )
 
 
-    # -----------------------------------------------------
-    # Highest change
-    # -----------------------------------------------------
 
     if (
         tool_name == "get_top_change"
@@ -271,10 +260,6 @@ def answer_ranking_followup(
             f"change percentage at {change}%."
         )
 
-
-    # -----------------------------------------------------
-    # Lowest change
-    # -----------------------------------------------------
 
     if (
         tool_name == "get_bottom_change"
@@ -313,9 +298,6 @@ def answer_ranking_followup(
     return None
 
 
-# =========================================================
-# Symbols
-# =========================================================
 
 def format_symbols(
     data: list,
@@ -361,9 +343,6 @@ def format_symbols(
     )
 
 
-# =========================================================
-# Industries
-# =========================================================
 
 def format_industries(
     data: list,
@@ -420,9 +399,6 @@ def format_industries(
     return "\n".join(lines)
 
 
-# =========================================================
-# Stocks by industry
-# =========================================================
 
 def format_all_stocks(
     data: list,

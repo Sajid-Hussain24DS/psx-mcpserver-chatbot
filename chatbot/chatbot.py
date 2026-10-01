@@ -18,9 +18,6 @@ from .llm import create_llm_client
 load_dotenv()
 
 
-# =========================================================
-# Environment
-# =========================================================
 
 MCP_SERVER_URL = os.getenv(
     "MCP_SERVER_URL"
@@ -39,10 +36,6 @@ if not MCP_SERVER_URL:
     )
 
 
-# =========================================================
-# Tool groups
-# =========================================================
-
 RANKING_TOOLS = {
     "get_top_change",
     "get_bottom_change",
@@ -51,26 +44,16 @@ RANKING_TOOLS = {
 }
 
 
-# =========================================================
-# Main chatbot logic
-# =========================================================
-
 async def process_question(
     user_question: str,
     conversation_history: list,
 ):
 
-    # -----------------------------------------------------
-    # MCP connection
-    # -----------------------------------------------------
 
     async with Client(
         MCP_SERVER_URL
     ) as mcp_client:
 
-        # -------------------------------------------------
-        # Get MCP tools
-        # -------------------------------------------------
 
         tools_result = (
             await mcp_client.list_tools()
@@ -98,16 +81,10 @@ async def process_question(
             )
 
 
-        # -------------------------------------------------
-        # LLM
-        # -------------------------------------------------
 
         llm_client = create_llm_client()
 
 
-        # -------------------------------------------------
-        # System prompt
-        # -------------------------------------------------
 
         system_prompt = """
 You are a factual PSX data chatbot.
@@ -162,9 +139,6 @@ Keep answers concise and factual.
 """
 
 
-        # -------------------------------------------------
-        # Conversation
-        # -------------------------------------------------
 
         messages = [
             {
@@ -186,10 +160,6 @@ Keep answers concise and factual.
             }
         )
 
-
-        # -------------------------------------------------
-        # First LLM call
-        # -------------------------------------------------
 
         try:
 
@@ -222,9 +192,6 @@ Keep answers concise and factual.
         )
 
 
-        # -------------------------------------------------
-        # No tool call
-        # -------------------------------------------------
 
         if not assistant_message.tool_calls:
 
@@ -237,9 +204,6 @@ Keep answers concise and factual.
             }
 
 
-        # -------------------------------------------------
-        # Store tool call
-        # -------------------------------------------------
 
         messages.append(
             {
@@ -272,10 +236,6 @@ Keep answers concise and factual.
         last_arguments = None
 
 
-        # -------------------------------------------------
-        # Execute MCP tools
-        # -------------------------------------------------
-
         for tool_call in (
             assistant_message.tool_calls
         ):
@@ -287,9 +247,6 @@ Keep answers concise and factual.
             last_tool = tool_name
 
 
-            # ---------------------------------------------
-            # Parse arguments
-            # ---------------------------------------------
 
             try:
 
@@ -312,9 +269,6 @@ Keep answers concise and factual.
             last_arguments = arguments
 
 
-            # ---------------------------------------------
-            # Call MCP
-            # ---------------------------------------------
 
             try:
 
@@ -337,10 +291,6 @@ Keep answers concise and factual.
                 }
 
 
-            # ---------------------------------------------
-            # Extract text
-            # ---------------------------------------------
-
             result_text = ""
 
 
@@ -353,10 +303,6 @@ Keep answers concise and factual.
 
                     result_text += content.text
 
-
-            # ---------------------------------------------
-            # Parse JSON
-            # ---------------------------------------------
 
             try:
 
@@ -382,9 +328,6 @@ Keep answers concise and factual.
             )
 
 
-            # =================================================
-            # Ranking tools
-            # =================================================
 
             if tool_name in RANKING_TOOLS:
 
@@ -421,9 +364,7 @@ Keep answers concise and factual.
                 }
 
 
-            # =================================================
-            # get_stocks
-            # =================================================
+            
 
             if tool_name == "get_stocks":
 
@@ -446,9 +387,7 @@ Keep answers concise and factual.
                 }
 
 
-            # =================================================
-            # get_symbols
-            # =================================================
+            
 
             if tool_name == "get_symbols":
 
@@ -464,9 +403,7 @@ Keep answers concise and factual.
                 }
 
 
-            # =================================================
-            # get_industries
-            # =================================================
+            
 
             if tool_name == "get_industries":
 
@@ -482,9 +419,7 @@ Keep answers concise and factual.
                 }
 
 
-        # -------------------------------------------------
-        # Final LLM response
-        # -------------------------------------------------
+        
 
         try:
 
@@ -526,9 +461,7 @@ Keep answers concise and factual.
         }
 
 
-# =========================================================
-# Streamlit wrapper
-# =========================================================
+
 
 def ask_chatbot(
     question: str,

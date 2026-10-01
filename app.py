@@ -284,9 +284,6 @@ if question:
                 st.error(answer)
 
 
-    # -----------------------------------------------------
-    # Rename empty chat using first question
-    # -----------------------------------------------------
 
     if not messages:
 
