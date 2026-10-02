@@ -1,485 +1,598 @@
+from __future__ import annotations
 
+from typing import Any
+
+
+# =========================================================
+# DATA NORMALIZATION
+# =========================================================
+
+def _to_list(data: Any) -> list:
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+
+        for key in (
+            "data",
+            "results",
+            "result",
+            "items",
+            "stocks",
+            "symbols",
+            "industries",
+            "records",
+        ):
+
+            value = data.get(key)
+
+            if isinstance(value, list):
+                return value
+
+            if isinstance(value, dict):
+
+                nested = _to_list(value)
+
+                if nested:
+                    return nested
+
+        if any(
+            key in data
+            for key in (
+                "symbol",
+                "Symbol",
+                "ticker",
+                "Ticker",
+            )
+        ):
+
+            return [data]
+
+    return []
+
+
+# =========================================================
+# VALUE HELPERS
+# =========================================================
+
+def _get_value(
+    item: Any,
+    *keys: str,
+    default: Any = "",
+) -> Any:
+
+    if not isinstance(
+        item,
+        dict,
+    ):
+
+        return default
+
+    for key in keys:
+
+        if (
+            key in item
+            and item[key] is not None
+        ):
+
+            return item[key]
+
+    return default
+
+
+def _format_number(
+    value: Any,
+) -> str:
+
+    try:
+
+        return f"{float(value):,.0f}"
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return str(value)
+
+
+def _format_percent(
+    value: Any,
+) -> str:
+
+    try:
+
+        number = float(value)
+
+        return f"{number:.2f}%"
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return str(value)
+
+
+# =========================================================
+# RANKINGS
+# =========================================================
 
 def format_ranking_result(
     tool_name: str,
-    data: list,
+    data: Any,
 ) -> str:
 
-    lines = []
+    rows = _to_list(data)
 
+    titles = {
 
-    if tool_name == "get_top_volume":
+        "get_top_volume":
+            "Top 10 stocks by trading volume:",
 
-        lines.append(
-            "Top 10 stocks by trading volume:"
+        "get_bottom_volume":
+            "Bottom 10 stocks by trading volume:",
+
+        "get_top_change":
+            "Top 10 stocks by change percentage:",
+
+        "get_bottom_change":
+            "Bottom 10 stocks by change percentage:",
+    }
+
+    title = titles.get(
+        tool_name,
+        "PSX stock ranking:",
+    )
+
+    if not rows:
+
+        return (
+            "No stock data was returned "
+            "by the PSX MCP server."
         )
 
-        for index, stock in enumerate(
-            data,
-            start=1,
-        ):
+    output = [
+        title,
+        "",
+    ]
 
-            symbol = stock.get(
-                "symbol",
-                "",
-            )
+    for index, item in enumerate(
+        rows[:10],
+        start=1,
+    ):
 
-            name = stock.get(
-                "name",
-                "",
-            )
-
-            volume = stock.get(
-                "volume",
-                0,
-            )
-
-            lines.append(
-                f"{index}. {symbol} - {name} "
-                f"- Volume: {volume:,}"
-            )
-
-
-    elif tool_name == "get_bottom_volume":
-
-        lines.append(
-            "Bottom 10 stocks by trading volume:"
+        symbol = _get_value(
+            item,
+            "symbol",
+            "Symbol",
+            "ticker",
+            "Ticker",
+            default="N/A",
         )
 
-        for index, stock in enumerate(
-            data,
-            start=1,
-        ):
-
-            symbol = stock.get(
-                "symbol",
-                "",
-            )
-
-            name = stock.get(
-                "name",
-                "",
-            )
-
-            volume = stock.get(
-                "volume",
-                0,
-            )
-
-            lines.append(
-                f"{index}. {symbol} - {name} "
-                f"- Volume: {volume:,}"
-            )
-
-
-    elif tool_name == "get_top_change":
-
-        lines.append(
-            "Top 10 stocks by change percentage:"
+        name = _get_value(
+            item,
+            "name",
+            "company_name",
+            "companyName",
+            "Name",
+            default="",
         )
 
-        for index, stock in enumerate(
-            data,
-            start=1,
-        ):
-
-            symbol = stock.get(
-                "symbol",
-                "",
-            )
-
-            name = stock.get(
-                "name",
-                "",
-            )
-
-            change = stock.get(
-                "change_percent",
-                0,
-            )
-
-            lines.append(
-                f"{index}. {symbol} - {name} "
-                f"- Change: {change}%"
-            )
-
-
-    elif tool_name == "get_bottom_change":
-
-        lines.append(
-            "Bottom 10 stocks by change percentage:"
+        change = _get_value(
+            item,
+            "change_percent",
+            "change_percentage",
+            "changePercent",
+            "change %",
+            "change",
+            default=None,
         )
 
-        for index, stock in enumerate(
-            data,
-            start=1,
-        ):
+        volume = _get_value(
+            item,
+            "volume",
+            "Volume",
+            "trading_volume",
+            "tradingVolume",
+            default=None,
+        )
 
-            symbol = stock.get(
-                "symbol",
-                "",
-            )
+        line = f"{index}. {symbol}"
 
-            name = stock.get(
-                "name",
-                "",
-            )
+        if name:
+            line += f" - {name}"
 
-            change = stock.get(
-                "change_percent",
-                0,
-            )
+        if "volume" in tool_name:
 
-            lines.append(
-                f"{index}. {symbol} - {name} "
-                f"- Change: {change}%"
-            )
+            if volume is not None:
+
+                line += (
+                    f" - Volume: "
+                    f"{_format_number(volume)}"
+                )
+
+        elif "change" in tool_name:
+
+            if change is not None:
+
+                line += (
+                    f" - Change: "
+                    f"{_format_percent(change)}"
+                )
+
+        output.append(line)
+
+    return "\n".join(output)
 
 
-    return "\n".join(lines)
-
-
+# =========================================================
+# RANKING FOLLOW-UP
+# =========================================================
 
 def answer_ranking_followup(
     user_question: str,
     tool_name: str,
-    data: list,
-):
-
-    if not data:
-        return None
-
-
-    question = user_question.lower()
-
-
-    # -----------------------------------------------------
-    # Highest trading volume
-    # -----------------------------------------------------
-
-    if (
-        tool_name == "get_top_volume"
-        and (
-            "which one" in question
-            or "which stock" in question
-            or "highest" in question
-            or "maximum" in question
-            or "highest trading volume" in question
-        )
-    ):
-
-        stock = data[0]
-
-        symbol = stock.get(
-            "symbol",
-            "",
-        )
-
-        name = stock.get(
-            "name",
-            "",
-        )
-
-        volume = stock.get(
-            "volume",
-            0,
-        )
-
-        return (
-            f"{symbol} ({name}) has the highest "
-            f"trading volume at {volume:,}."
-        )
-
-
-
-    if (
-        tool_name == "get_bottom_volume"
-        and (
-            "which one" in question
-            or "which stock" in question
-            or "lowest" in question
-            or "minimum" in question
-            or "lowest trading volume" in question
-        )
-    ):
-
-        stock = data[0]
-
-        symbol = stock.get(
-            "symbol",
-            "",
-        )
-
-        name = stock.get(
-            "name",
-            "",
-        )
-
-        volume = stock.get(
-            "volume",
-            0,
-        )
-
-        return (
-            f"{symbol} ({name}) has the lowest "
-            f"trading volume at {volume:,}."
-        )
-
-
-
-    if (
-        tool_name == "get_top_change"
-        and (
-            "which one" in question
-            or "which stock" in question
-            or "highest" in question
-            or "maximum" in question
-            or "highest change" in question
-        )
-    ):
-
-        stock = data[0]
-
-        symbol = stock.get(
-            "symbol",
-            "",
-        )
-
-        name = stock.get(
-            "name",
-            "",
-        )
-
-        change = stock.get(
-            "change_percent",
-            0,
-        )
-
-        return (
-            f"{symbol} ({name}) has the highest "
-            f"change percentage at {change}%."
-        )
-
-
-    if (
-        tool_name == "get_bottom_change"
-        and (
-            "which one" in question
-            or "which stock" in question
-            or "lowest" in question
-            or "minimum" in question
-            or "lowest change" in question
-        )
-    ):
-
-        stock = data[0]
-
-        symbol = stock.get(
-            "symbol",
-            "",
-        )
-
-        name = stock.get(
-            "name",
-            "",
-        )
-
-        change = stock.get(
-            "change_percent",
-            0,
-        )
-
-        return (
-            f"{symbol} ({name}) has the lowest "
-            f"change percentage at {change}%."
-        )
-
-
-    return None
-
-
-
-def format_symbols(
-    data: list,
+    data: Any,
 ) -> str:
 
-    if not data:
+    rows = _to_list(data)
+
+    if not rows:
 
         return (
-            "No PSX stock symbols were found."
+            "No stock data was returned "
+            "by the PSX MCP server."
         )
 
+    first = rows[0]
+
+    symbol = _get_value(
+        first,
+        "symbol",
+        "Symbol",
+        "ticker",
+        "Ticker",
+        default="N/A",
+    )
+
+    name = _get_value(
+        first,
+        "name",
+        "company_name",
+        "companyName",
+        "Name",
+        default="",
+    )
+
+    change = _get_value(
+        first,
+        "change_percent",
+        "change_percentage",
+        "changePercent",
+        "change",
+        default=None,
+    )
+
+    volume = _get_value(
+        first,
+        "volume",
+        "Volume",
+        "trading_volume",
+        default=None,
+    )
+
+    answer = str(symbol)
+
+    if name:
+        answer += f" - {name}"
+
+    if volume is not None:
+
+        answer += (
+            f" - Volume: "
+            f"{_format_number(volume)}"
+        )
+
+    if change is not None:
+
+        answer += (
+            f" - Change: "
+            f"{_format_percent(change)}"
+        )
+
+    return answer
+
+
+# =========================================================
+# SYMBOLS
+# =========================================================
+
+def format_symbols(
+    data: Any,
+) -> str:
+
+    rows = _to_list(data)
+
+    if not rows:
+
+        return "No PSX symbols were returned."
 
     symbols = []
 
-
-    for item in data:
+    for item in rows:
 
         if isinstance(
             item,
             dict,
         ):
 
-            symbol = item.get(
+            symbol = _get_value(
+                item,
                 "symbol",
-                "",
+                "Symbol",
+                "ticker",
+                "Ticker",
+                default="",
             )
 
         else:
 
             symbol = str(item)
 
-
         if symbol:
 
-            symbols.append(symbol)
+            symbols.append(
+                str(symbol)
+            )
 
+    # Remove duplicate symbols.
+    unique_symbols = []
+
+    seen = set()
+
+    for symbol in symbols:
+
+        key = symbol.strip().upper()
+
+        if key not in seen:
+
+            seen.add(key)
+
+            unique_symbols.append(
+                symbol
+            )
 
     return (
-        f"The PSX database contains "
-        f"{len(symbols)} active stock symbols:"
-        f"\n\n"
-        + ", ".join(symbols)
+        f"Total PSX symbols: "
+        f"{len(unique_symbols)}\n\n"
+        + ", ".join(
+            unique_symbols
+        )
     )
 
 
+# =========================================================
+# INDUSTRIES
+# =========================================================
 
 def format_industries(
-    data: list,
+    data: Any,
 ) -> str:
 
-    if not data:
+    rows = _to_list(data)
+
+    if not rows:
 
         return (
-            "No PSX industries were found."
+            "No PSX industries were returned."
         )
-
 
     industries = []
 
-
-    for item in data:
+    for item in rows:
 
         if isinstance(
             item,
             dict,
         ):
 
-            industry = item.get(
+            industry = _get_value(
+                item,
                 "industry",
-                "",
+                "Industry",
+                "name",
+                "Name",
+                default="",
             )
 
         else:
 
             industry = str(item)
 
-
         if industry:
 
-            industries.append(industry)
+            industries.append(
+                str(industry)
+            )
 
+    unique_industries = []
 
-    lines = [
-        "Available PSX industries:",
+    seen = set()
+
+    for industry in industries:
+
+        key = industry.strip().lower()
+
+        if key not in seen:
+
+            seen.add(key)
+
+            unique_industries.append(
+                industry
+            )
+
+    output = [
+        (
+            f"Total industries: "
+            f"{len(unique_industries)}"
+        ),
         "",
     ]
 
-
     for index, industry in enumerate(
-        industries,
+        unique_industries,
         start=1,
     ):
 
-        lines.append(
+        output.append(
             f"{index}. {industry}"
         )
 
+    return "\n".join(output)
 
-    return "\n".join(lines)
 
-
+# =========================================================
+# ALL / INDUSTRY STOCKS
+# =========================================================
 
 def format_all_stocks(
-    data: list,
+    data: Any,
     industry: str = "",
 ) -> str:
 
-    if not data:
+    rows = _to_list(data)
 
-        if industry:
+    if not rows:
 
-            return (
-                f"No stocks were found for the "
-                f"{industry} industry."
-            )
-
-        return "No stocks were found."
-
-
-    lines = []
-
+        return (
+            "No PSX stock data was returned."
+        )
 
     if industry:
 
-        lines.append(
-            f"Stocks in the {industry} industry:"
+        title = (
+            f"PSX stocks in "
+            f"{industry}:"
         )
 
     else:
 
-        lines.append(
-            "PSX stocks:"
-        )
+        title = "All PSX stocks:"
 
+    output = [
+        f"Total stocks: {len(rows)}",
+        "",
+        title,
+        "",
+    ]
 
-    lines.append("")
-
-
-    for index, stock in enumerate(
-        data,
+    for index, item in enumerate(
+        rows,
         start=1,
     ):
 
-        symbol = stock.get(
+        symbol = _get_value(
+            item,
             "symbol",
-            "",
+            "Symbol",
+            "ticker",
+            "Ticker",
+            default="N/A",
         )
 
-        name = stock.get(
+        name = _get_value(
+            item,
             "name",
-            "",
+            "company_name",
+            "companyName",
+            "Name",
+            default="",
         )
 
-        change = stock.get(
-            "change_percent"
+        change = _get_value(
+            item,
+            "change_percent",
+            "change_percentage",
+            "changePercent",
+            "change %",
+            "change",
+            default=None,
         )
 
-        volume = stock.get(
-            "volume"
+        volume = _get_value(
+            item,
+            "volume",
+            "Volume",
+            "trading_volume",
+            "tradingVolume",
+            default=None,
         )
 
-
-        line = (
-            f"{index}. {symbol} - {name}"
+        row_industry = _get_value(
+            item,
+            "industry",
+            "Industry",
+            default="",
         )
 
+        line = f"{index}. {symbol}"
+
+        if name:
+
+            line += (
+                f" - {name}"
+            )
+
+        if row_industry and not industry:
+
+            line += (
+                f" - Industry: "
+                f"{row_industry}"
+            )
 
         if change is not None:
 
             line += (
-                f" - Change: {change}%"
+                f" - Change: "
+                f"{_format_percent(change)}"
             )
-
 
         if volume is not None:
 
             line += (
-                f" - Volume: {volume:,}"
+                f" - Volume: "
+                f"{_format_number(volume)}"
             )
 
+        output.append(line)
 
-        lines.append(line)
+    return "\n".join(output)
 
 
-    return "\n".join(lines)
+# =========================================================
+# COMPATIBILITY WRAPPERS
+# =========================================================
+
+def format_top_bottom(
+    data: Any,
+    tool_name: str,
+) -> str:
+
+    return format_ranking_result(
+        tool_name,
+        data,
+    )
+
+
+def format_stock_data(
+    data: Any,
+    industry: str = "",
+) -> str:
+
+    return format_all_stocks(
+        data,
+        industry,
+    )

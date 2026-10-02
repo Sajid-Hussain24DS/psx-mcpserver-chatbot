@@ -1,7 +1,8 @@
-streamlit
-openai
-mcp[cli]
-python-dotenv
-anyio
-httpx
-fastmcp
+streamlit==1.57.0
+openai==2.36.0
+mcp[cli]==2.2.0
+python-dotenv==1.2.2
+anyio==4.13.0
+httpx==0.28.1
+fastmcp==4.0.3
+httpx2==2.12.0

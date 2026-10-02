@@ -3,16 +3,15 @@ import os
 from openai import AsyncOpenAI
 
 
-def create_llm_client():
+def create_llm_client() -> AsyncOpenAI:
 
     provider = os.getenv(
         "LLM_PROVIDER",
         "groq",
     ).lower()
 
-
     # -----------------------------------------------------
-    # Groq
+    # GROQ
     # -----------------------------------------------------
 
     if provider == "groq":
@@ -22,18 +21,20 @@ def create_llm_client():
         )
 
         if not api_key:
+
             raise RuntimeError(
                 "GROQ_API_KEY is not configured."
             )
 
         return AsyncOpenAI(
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
+            base_url=(
+                "https://api.groq.com/openai/v1"
+            ),
         )
 
-
     # -----------------------------------------------------
-    # OpenRouter
+    # OPENROUTER
     # -----------------------------------------------------
 
     if provider == "openrouter":
@@ -43,18 +44,20 @@ def create_llm_client():
         )
 
         if not api_key:
+
             raise RuntimeError(
                 "OPENROUTER_API_KEY is not configured."
             )
 
         return AsyncOpenAI(
             api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
+            base_url=(
+                "https://openrouter.ai/api/v1"
+            ),
         )
 
-
     # -----------------------------------------------------
-    # DeepSeek
+    # DEEPSEEK
     # -----------------------------------------------------
 
     if provider == "deepseek":
@@ -64,18 +67,20 @@ def create_llm_client():
         )
 
         if not api_key:
+
             raise RuntimeError(
                 "DEEPSEEK_API_KEY is not configured."
             )
 
         return AsyncOpenAI(
             api_key=api_key,
-            base_url="https://api.deepseek.com",
+            base_url=(
+                "https://api.deepseek.com"
+            ),
         )
 
-
     # -----------------------------------------------------
-    # Custom OpenAI-compatible provider
+    # CUSTOM
     # -----------------------------------------------------
 
     if provider == "custom":
@@ -89,11 +94,13 @@ def create_llm_client():
         )
 
         if not api_key:
+
             raise RuntimeError(
                 "LLM_API_KEY is not configured."
             )
 
         if not base_url:
+
             raise RuntimeError(
                 "LLM_BASE_URL is not configured."
             )
@@ -102,7 +109,6 @@ def create_llm_client():
             api_key=api_key,
             base_url=base_url,
         )
-
 
     raise RuntimeError(
         f"Unsupported LLM provider: {provider}"

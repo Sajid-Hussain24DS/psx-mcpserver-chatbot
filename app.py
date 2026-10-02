@@ -58,24 +58,20 @@ st.caption(
 # ---------------------------------------------------------
 
 if "chats" not in st.session_state:
-
     st.session_state.chats = {
         "New Chat": []
     }
 
 
 if "active_chat" not in st.session_state:
-
     st.session_state.active_chat = "New Chat"
 
 
 if "last_tool" not in st.session_state:
-
     st.session_state.last_tool = None
 
 
 if "last_arguments" not in st.session_state:
-
     st.session_state.last_arguments = None
 
 
@@ -94,13 +90,35 @@ def generate_chat_title(question: str) -> str:
     max_length = 42
 
     if len(title) > max_length:
-
         title = (
             title[:max_length].rstrip()
             + "..."
         )
 
-    return title
+    return title or "New Chat"
+
+
+# ---------------------------------------------------------
+# Create Unique Chat Name
+# ---------------------------------------------------------
+
+def create_new_chat_name() -> str:
+
+    if (
+        "New Chat" not in st.session_state.chats
+        or not st.session_state.chats["New Chat"]
+    ):
+        return "New Chat"
+
+    counter = 1
+
+    while (
+        f"New Chat {counter}"
+        in st.session_state.chats
+    ):
+        counter += 1
+
+    return f"New Chat {counter}"
 
 
 # ---------------------------------------------------------
@@ -114,42 +132,17 @@ with st.sidebar:
         use_container_width=True,
     ):
 
-        new_chat_name = "New Chat"
+        new_chat_name = create_new_chat_name()
 
-        if (
-            new_chat_name in st.session_state.chats
-            and not st.session_state.chats[new_chat_name]
-        ):
+        st.session_state.chats[
+            new_chat_name
+        ] = []
 
-            st.session_state.active_chat = (
-                new_chat_name
-            )
-
-        else:
-
-            counter = 1
-
-            while (
-                f"New Chat {counter}"
-                in st.session_state.chats
-            ):
-
-                counter += 1
-
-            new_chat_name = (
-                f"New Chat {counter}"
-            )
-
-            st.session_state.chats[
-                new_chat_name
-            ] = []
-
-            st.session_state.active_chat = (
-                new_chat_name
-            )
+        st.session_state.active_chat = (
+            new_chat_name
+        )
 
         st.session_state.last_tool = None
-
         st.session_state.last_arguments = None
 
         st.rerun()
@@ -175,7 +168,6 @@ with st.sidebar:
             )
 
             st.session_state.last_tool = None
-
             st.session_state.last_arguments = None
 
             st.rerun()
@@ -183,6 +175,10 @@ with st.sidebar:
 
     st.divider()
 
+
+    # -----------------------------------------------------
+    # MCP Debug
+    # -----------------------------------------------------
 
     with st.expander("MCP Debug"):
 
@@ -213,9 +209,10 @@ with st.sidebar:
 
 current_chat = st.session_state.active_chat
 
-messages = st.session_state.chats[
-    current_chat
-]
+messages = st.session_state.chats.get(
+    current_chat,
+    [],
+)
 
 
 # ---------------------------------------------------------
@@ -242,15 +239,31 @@ question = st.chat_input(
 )
 
 
+# ---------------------------------------------------------
+# Process User Question
+# ---------------------------------------------------------
+
 if question:
+
+    # ---------------------------------------------
+    # Display User Message Immediately
+    # ---------------------------------------------
 
     with st.chat_message("user"):
 
         st.markdown(question)
 
 
+    # ---------------------------------------------
+    # Copy Previous Conversation
+    # ---------------------------------------------
+
     previous_messages = messages.copy()
 
+
+    # ---------------------------------------------
+    # Call Chatbot
+    # ---------------------------------------------
 
     with st.chat_message("assistant"):
 
@@ -265,25 +278,69 @@ if question:
                     previous_messages,
                 )
 
-                answer = result["answer"]
+
+                # ---------------------------------
+                # Validate Chatbot Response
+                # ---------------------------------
+
+                if isinstance(result, dict):
+
+                    answer = result.get(
+                        "answer",
+                        "I couldn't generate a response.",
+                    )
+
+                    tool = result.get(
+                        "tool"
+                    )
+
+                    arguments = result.get(
+                        "arguments"
+                    )
+
+                else:
+
+                    answer = str(result)
+
+                    tool = None
+
+                    arguments = None
+
+
+                # ---------------------------------
+                # Display Answer
+                # ---------------------------------
 
                 st.markdown(answer)
 
-                st.session_state.last_tool = (
-                    result["tool"]
-                )
+
+                # ---------------------------------
+                # Save MCP Debug Information
+                # ---------------------------------
+
+                st.session_state.last_tool = tool
 
                 st.session_state.last_arguments = (
-                    result["arguments"]
+                    arguments
                 )
+
 
             except Exception as e:
 
-                answer = f"Error: {str(e)}"
+                answer = (
+                    f"Error: {str(e)}"
+                )
 
                 st.error(answer)
 
+                st.session_state.last_tool = None
 
+                st.session_state.last_arguments = None
+
+
+    # -------------------------------------------------
+    # Rename First Chat
+    # -------------------------------------------------
 
     if not messages:
 
@@ -295,24 +352,41 @@ if question:
 
             original_messages = (
                 st.session_state.chats.pop(
-                    current_chat
+                    current_chat,
+                    [],
                 )
             )
 
+            # Prevent accidental duplicate title
+            final_title = new_title
+
+            counter = 1
+
+            while (
+                final_title in st.session_state.chats
+            ):
+
+                final_title = (
+                    f"{new_title} {counter}"
+                )
+
+                counter += 1
+
+
             st.session_state.chats[
-                new_title
+                final_title
             ] = original_messages
 
             st.session_state.active_chat = (
-                new_title
+                final_title
             )
 
-            current_chat = new_title
+            current_chat = final_title
 
 
-    # -----------------------------------------------------
-    # Save messages
-    # -----------------------------------------------------
+    # -------------------------------------------------
+    # Save User Message
+    # -------------------------------------------------
 
     st.session_state.chats[
         current_chat
@@ -324,6 +398,10 @@ if question:
     )
 
 
+    # -------------------------------------------------
+    # Save Assistant Message
+    # -------------------------------------------------
+
     st.session_state.chats[
         current_chat
     ].append(
@@ -332,5 +410,10 @@ if question:
             "content": answer,
         }
     )
+
+
+    # -------------------------------------------------
+    # Refresh UI
+    # -------------------------------------------------
 
     st.rerun()
