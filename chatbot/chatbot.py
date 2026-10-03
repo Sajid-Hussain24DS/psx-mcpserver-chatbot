@@ -2910,7 +2910,8 @@ load_dotenv()
 
 MCP_SERVER_URL = os.getenv(
     "MCP_SERVER_URL",
-    "http://127.0.0.1:5173/mcp",
+    
+    "https://sore-tan-dove.fastmcp.app/mcp",
 )
 
 LLM_PROVIDER = os.getenv(
