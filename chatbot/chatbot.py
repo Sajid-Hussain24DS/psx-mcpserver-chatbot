@@ -5,23 +5,50 @@
 # import json
 # import os
 # import re
-# import time
-# from typing import Any
+# import threading
+# import webbrowser
+# from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# from urllib.parse import parse_qs, urlparse
 
+# import httpx2
 # from dotenv import load_dotenv
-# from chatbot.mcp_client import mcp_session
+# from pydantic import AnyUrl
+
+# from mcp import ClientSession
+# from mcp.client.auth import (
+#     AuthorizationCodeResult,
+#     OAuthClientProvider,
+# )
+# from mcp.client.streamable_http import (
+#     streamable_http_client,
+# )
+# from mcp.shared.auth import (
+#     OAuthClientInformationFull,
+#     OAuthClientMetadata,
+#     OAuthToken,
+# )
+
 # from chatbot.formatters import (
 #     format_industries,
 #     format_stock_data,
 #     format_symbols,
 #     format_top_bottom,
 # )
+
 # from chatbot.llm import create_llm_client
 
 
 # load_dotenv()
 
 
+# # =========================================================
+# # CONFIG
+# # =========================================================
+
+# MCP_SERVER_URL = os.getenv(
+#     "MCP_SERVER_URL",
+#     "https://fluttering-blue-ox.fastmcp.app/mcp",
+# )
 
 # LLM_PROVIDER = os.getenv(
 #     "LLM_PROVIDER",
@@ -33,373 +60,824 @@
 #     "openai/gpt-oss-120b",
 # )
 
-# MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "6"))
-# MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "12"))
+# CALLBACK_HOST = "127.0.0.1"
+# CALLBACK_PORT = 3030
+
+# CALLBACK_URL = (
+#     f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/callback"
+# )
 
 
-# class PSXChatbot:
+# # =========================================================
+# # TOKEN STORAGE
+# # =========================================================
+
+# class InMemoryTokenStorage:
 #     """
-#     Application-side orchestrator for Groq + MCP.
-
-#     The LLM only requests tools. This class is responsible for
-#     validating/routing those requests, executing MCP tools, passing
-#     results back to the LLM, and returning the final answer.
+#     Keeps OAuth tokens and client information
+#     while the current Streamlit process is alive.
 #     """
 
 #     def __init__(self) -> None:
-#         self.tools: list[Any] = []
-#         self.tool_map: dict[str, Any] = {}
+#         self.tokens: OAuthToken | None = None
+#         self.client_info: (
+#             OAuthClientInformationFull | None
+#         ) = None
 
-#         self.last_tool: str | None = None
-#         self.last_arguments: dict[str, Any] = {}
-#         self.last_debug: dict[str, Any] | None = None
+#     async def get_tokens(self):
+#         return self.tokens
 
-#     # ------------------------------------------------------------------
-#     # Text helpers
-#     # ------------------------------------------------------------------
-
-#     @staticmethod
-#     def _normalize_text(text: str) -> str:
-#         text = str(text).lower().strip()
-#         return re.sub(r"\s+", " ", text)
-
-#     # ------------------------------------------------------------------
-#     # MCP
-#     # ------------------------------------------------------------------
-
-#     async def _load_tools(self, session: ClientSession) -> list[Any]:
-#         response = await session.list_tools()
-#         self.tools = list(response.tools or [])
-#         self.tool_map = {tool.name: tool for tool in self.tools}
-#         return self.tools
-
-#     async def _call_tool(
+#     async def set_tokens(
 #         self,
-#         session: ClientSession,
-#         tool_name: str,
-#         arguments: dict[str, Any] | None = None,
-#     ) -> Any:
-#         arguments = arguments or {}
+#         tokens: OAuthToken,
+#     ) -> None:
+#         self.tokens = tokens
 
-#         if tool_name not in self.tool_map:
-#             raise ValueError(f"Unknown MCP tool: {tool_name}")
+#     async def get_client_info(self):
+#         return self.client_info
 
-#         started = time.perf_counter()
-#         self.last_tool = tool_name
-#         self.last_arguments = arguments
+#     async def set_client_info(
+#         self,
+#         client_info: OAuthClientInformationFull,
+#     ) -> None:
+#         self.client_info = client_info
 
-#         try:
-#             result = await session.call_tool(
-#                 tool_name,
-#                 arguments=arguments,
-#             )
 
-#             self.last_debug = {
-#                 "status": "success",
-#                 "tool": tool_name,
-#                 "arguments": arguments,
-#                 "duration_ms": round(
-#                     (time.perf_counter() - started) * 1000,
-#                     2,
-#                 ),
-#                 "result_received": True,
-#             }
+# _OAUTH_STORAGE = InMemoryTokenStorage()
 
-#             return result
 
-#         except Exception as exc:
-#             self.last_debug = {
-#                 "status": "error",
-#                 "tool": tool_name,
-#                 "arguments": arguments,
-#                 "duration_ms": round(
-#                     (time.perf_counter() - started) * 1000,
-#                     2,
-#                 ),
-#                 "result_received": False,
-#                 "error": str(exc),
-#             }
-#             raise
+# # =========================================================
+# # OAUTH CALLBACK SERVER
+# # =========================================================
 
-#     # ------------------------------------------------------------------
-#     # Industry detection
-#     # ------------------------------------------------------------------
+# class OAuthCallbackServer:
 
-#     async def _find_industry_in_question(
-                
-#             self,
-#             session: ClientSession,
-#             question: str,
-#         ) -> str | None:
-                
-#             question_normalized = self._normalize_text(question)
+#     def __init__(
+#         self,
+#         host: str = CALLBACK_HOST,
+#         port: int = CALLBACK_PORT,
+#     ) -> None:
 
-#             try:
-#                 result = await self._call_tool(
-#                     session,
-#                     "get_industries",
-#                     {},
+#         self.host = host
+#         self.port = port
+
+#         self.server = None
+#         self.thread = None
+
+#         self.code = None
+#         self.state = None
+#         self.iss = None
+#         self.error = None
+
+#         self.event = threading.Event()
+
+#     def start(self) -> None:
+
+#         callback_server = self
+
+#         class CallbackHandler(
+#             BaseHTTPRequestHandler
+#         ):
+
+#             def do_GET(self):
+
+#                 parsed = urlparse(self.path)
+
+#                 if parsed.path != "/callback":
+
+#                     self.send_response(404)
+#                     self.end_headers()
+
+#                     return
+
+#                 params = parse_qs(
+#                     parsed.query
 #                 )
 
-#                 industries = self._extract_tool_result(result)
+#                 callback_server.code = params.get(
+#                     "code",
+#                     [None],
+#                 )[0]
 
-#                 if isinstance(industries, dict):
-#                     possible_industries = (
-#                         industries.get("industries")
-#                         or industries.get("data")
-#                         or industries.get("results")
-#                         or []
+#                 callback_server.state = params.get(
+#                     "state",
+#                     [None],
+#                 )[0]
+
+#                 callback_server.iss = params.get(
+#                     "iss",
+#                     [None],
+#                 )[0]
+
+#                 callback_server.error = params.get(
+#                     "error",
+#                     [None],
+#                 )[0]
+
+#                 callback_server.event.set()
+
+#                 self.send_response(200)
+
+#                 self.send_header(
+#                     "Content-Type",
+#                     "text/html; charset=utf-8",
+#                 )
+
+#                 self.end_headers()
+
+#                 if callback_server.error:
+
+#                     message = (
+#                         "<h2>"
+#                         "PSX Chatbot authorization failed."
+#                         "</h2>"
+#                         f"<p>{callback_server.error}</p>"
+#                         "<p>You can close this tab.</p>"
 #                     )
-#                 elif isinstance(industries, list):
-#                     possible_industries = industries
+
 #                 else:
-#                     possible_industries = []
 
-#                 candidates: list[tuple[str, str]] = []
-
-#                 for item in possible_industries:
-#                     if isinstance(item, dict):
-#                         name = (
-#                             item.get("industry")
-#                             or item.get("name")
-#                             or item.get("sector")
-#                         )
-#                     else:
-#                         name = str(item)
-
-#                     if not name:
-#                         continue
-
-#                     original_name = str(name).strip()
-#                     normalized_name = self._normalize_text(original_name)
-
-#                     candidates.append(
-#                         (normalized_name, original_name)
+#                     message = (
+#                         "<h2>"
+#                         "PSX Chatbot authorized."
+#                         "</h2>"
+#                         "<p>"
+#                         "You can close this tab and return "
+#                         "to Streamlit."
+#                         "</p>"
 #                     )
 
-#                 # --------------------------------------------------------------
-#                 # Direct phrase match
-#                 # --------------------------------------------------------------
-#                 for normalized_name, original_name in candidates:
-#                     if normalized_name in question_normalized:
-#                         return original_name
+#                 html = f"""
+#                 <!doctype html>
+#                 <html>
+#                 <head>
+#                     <title>PSX Chatbot</title>
+#                 </head>
+#                 <body>
+#                     {message}
+#                 </body>
+#                 </html>
+#                 """
 
-#                 # --------------------------------------------------------------
-#                 # Normalize common user wording
-#                 #
-#                 # This does NOT hardcode the industry list.
-#                 # The actual industries still come from get_industries().
-#                 # --------------------------------------------------------------
-#                 aliases = {
-#                     "banking": "bank",
-#                     "banks": "bank",
-#                     "bank": "bank",
-#                     "textiles": "textile",
-#                     "chemicals": "chemical",
-#                     "pharmaceuticals": "pharmaceutical",
-#                     "automobiles": "automobile",
-#                     "securities": "security",
-#                     "companies": "company",
-#                     "industries": "industry",
-#                 }
+#                 self.wfile.write(
+#                     html.encode("utf-8")
+#                 )
 
-#                 def normalize_token(token: str) -> str:
-#                     token = token.lower().strip()
+#             def log_message(
+#                 self,
+#                 format,
+#                 *args,
+#             ):
+#                 return
 
-#                     if token in aliases:
-#                         return aliases[token]
+#         try:
 
-#                     if len(token) > 4 and token.endswith("ies"):
-#                         return token[:-3] + "y"
+#             self.server = ThreadingHTTPServer(
+#                 (
+#                     self.host,
+#                     self.port,
+#                 ),
+#                 CallbackHandler,
+#             )
 
-#                     if len(token) > 4 and token.endswith("s"):
-#                         return token[:-1]
+#         except OSError as exc:
 
-#                     return token
+#             raise RuntimeError(
+#                 f"Port {self.port} is already in use. "
+#                 "Close the old PSX chatbot/Streamlit "
+#                 "process and start again."
+#             ) from exc
 
-#                 question_tokens = {
-#                     normalize_token(token)
-#                     for token in re.findall(
-#                         r"[a-z0-9]+",
-#                         question_normalized,
+#         self.thread = threading.Thread(
+#             target=self.server.serve_forever,
+#             daemon=True,
+#         )
+
+#         self.thread.start()
+
+#     def wait_for_callback(
+#         self,
+#         timeout: int = 300,
+#     ) -> AuthorizationCodeResult:
+
+#         received = self.event.wait(timeout)
+
+#         if not received:
+
+#             raise TimeoutError(
+#                 "OAuth callback timed out after "
+#                 f"{timeout} seconds."
+#             )
+
+#         if self.error:
+
+#             raise RuntimeError(
+#                 "OAuth authorization failed: "
+#                 f"{self.error}"
+#             )
+
+#         if not self.code:
+
+#             raise RuntimeError(
+#                 "OAuth callback did not contain "
+#                 "an authorization code."
+#             )
+
+#         return AuthorizationCodeResult(
+#             code=self.code,
+#             state=self.state,
+#             iss=self.iss,
+#         )
+
+#     def stop(self) -> None:
+
+#         if self.server is not None:
+
+#             self.server.shutdown()
+#             self.server.server_close()
+
+#             self.server = None
+
+
+# # =========================================================
+# # OAUTH PROVIDER
+# # =========================================================
+
+# def create_oauth_provider(
+#     callback_server: OAuthCallbackServer,
+# ):
+
+#     async def redirect_handler(
+#         authorization_url: str,
+#     ) -> None:
+
+#         print(
+#             "\n========================================"
+#         )
+
+#         print(
+#             "PSX MCP authorization required."
+#         )
+
+#         print(
+#             "Opening browser..."
+#         )
+
+#         print(
+#             "========================================\n"
+#         )
+
+#         webbrowser.open_new_tab(
+#             authorization_url
+#         )
+
+#     async def callback_handler():
+
+#         try:
+
+#             return await asyncio.to_thread(
+#                 callback_server.wait_for_callback,
+#                 300,
+#             )
+
+#         finally:
+
+#             callback_server.stop()
+
+#     return OAuthClientProvider(
+
+#         server_url=MCP_SERVER_URL,
+
+#         client_metadata=OAuthClientMetadata(
+
+#             client_name="PSX Chatbot",
+
+#             redirect_uris=[
+#                 AnyUrl(CALLBACK_URL)
+#             ],
+
+#             grant_types=[
+#                 "authorization_code",
+#                 "refresh_token",
+#             ],
+
+#             response_types=[
+#                 "code"
+#             ],
+
+#             scope="user",
+#         ),
+
+#         storage=_OAUTH_STORAGE,
+
+#         redirect_handler=redirect_handler,
+
+#         callback_handler=callback_handler,
+#     )
+
+
+# # =========================================================
+# # CHATBOT
+# # =========================================================
+
+# class PSXChatbot:
+
+#     def __init__(self) -> None:
+
+#         self.tools = []
+
+#         self.tool_map = {}
+
+#         self.last_tool = None
+
+#         self.last_arguments = {}
+
+#         self.conversation_history = []
+
+#     # =====================================================
+#     # NORMALIZE TEXT
+#     # =====================================================
+
+#     @staticmethod
+#     def _normalize_text(value: str) -> str:
+
+#         value = value.lower().strip()
+
+#         value = re.sub(
+#             r"[^a-z0-9]+",
+#             " ",
+#             value,
+#         )
+
+#         return " ".join(
+#             value.split()
+#         )
+
+#     # =====================================================
+#     # EXTRACT INDUSTRY FROM QUESTION
+#     # =====================================================
+
+#     def _find_industry_in_question(
+#         self,
+#         user_message: str,
+#         industries: list[str],
+#     ) -> str | None:
+
+#         question = self._normalize_text(
+#             user_message
+#         )
+
+#         normalized_industries = []
+
+#         for industry in industries:
+
+#             normalized = self._normalize_text(
+#                 industry
+#             )
+
+#             if normalized:
+
+#                 normalized_industries.append(
+#                     (
+#                         normalized,
+#                         industry,
 #                     )
-#                     if len(token) >= 3
-#                 }
+#                 )
 
-#                 # --------------------------------------------------------------
-#                 # Token matching
-#                 #
-#                 # Example:
-#                 # "which banking stocks..."
-#                 #
-#                 # banking -> bank
-#                 # COMMERCIAL BANKS -> commercial + bank
-#                 #
-#                 # Therefore COMMERCIAL BANKS is detected.
-#                 # --------------------------------------------------------------
-#                 best_match: str | None = None
-#                 best_score = 0.0
+#         # Exact/substring match first.
+#         for normalized, original in normalized_industries:
 
-#                 for normalized_name, original_name in candidates:
-#                     industry_tokens = {
-#                         normalize_token(token)
-#                         for token in re.findall(
-#                             r"[a-z0-9]+",
-#                             normalized_name,
-#                         )
-#                         if len(token) >= 3
-#                     }
+#             if normalized in question:
 
-#                     overlap = question_tokens.intersection(
-#                         industry_tokens
-#                     )
+#                 return original
 
-#                     if not overlap:
-#                         continue
+#         # Extract text after common phrases.
+#         patterns = (
+#             r"\bstocks?\s+(?:in|of|from)\s+(.+)$",
+#             r"\bshares?\s+(?:in|of|from)\s+(.+)$",
+#             r"\bcompanies\s+(?:in|of|from)\s+(.+)$",
+#             r"\b(?:industry|sector)\s*[:\-]?\s*(.+)$",
+#         )
 
-#                     score = len(overlap) / len(industry_tokens)
+#         candidate = None
 
-#                     if score > best_score:
-#                         best_score = score
-#                         best_match = original_name
+#         for pattern in patterns:
 
-#                 if best_match is not None and best_score >= 0.5:
-#                     return best_match
+#             match = re.search(
+#                 pattern,
+#                 question,
+#             )
 
-#                 # --------------------------------------------------------------
-#                 # Fuzzy fallback
-#                 # --------------------------------------------------------------
-#                 question_words = [
-#                     word
-#                     for word in question_tokens
-#                     if len(word) >= 4
-#                 ]
+#             if match:
 
-#                 for normalized_name, original_name in candidates:
-#                     industry_tokens = [
-#                         normalize_token(token)
-#                         for token in re.findall(
-#                             r"[a-z0-9]+",
-#                             normalized_name,
-#                         )
-#                         if len(token) >= 4
-#                     ]
+#                 candidate = match.group(1).strip()
 
-#                     for industry_token in industry_tokens:
-#                         for question_word in question_words:
-#                             ratio = difflib.SequenceMatcher(
-#                                 None,
-#                                 industry_token,
-#                                 question_word,
-#                             ).ratio()
+#                 break
 
-#                             if ratio >= 0.80:
-#                                 return original_name
-
-#             except Exception:
-#                 return None
+#         if not candidate:
 
 #             return None
 
-#     # ------------------------------------------------------------------
-#     # Direct deterministic routing
-#     # ------------------------------------------------------------------
+#         # Exact candidate match.
+#         for normalized, original in normalized_industries:
+
+#             if candidate == normalized:
+
+#                 return original
+
+#         # Conservative fuzzy matching.
+#         matches = difflib.get_close_matches(
+#             candidate,
+#             [
+#                 normalized
+#                 for normalized, _
+#                 in normalized_industries
+#             ],
+#             n=1,
+#             cutoff=0.90,
+#         )
+
+#         if matches:
+
+#             matched = matches[0]
+
+#             for normalized, original in normalized_industries:
+
+#                 if normalized == matched:
+
+#                     return original
+
+#         return None
+
+#     # =====================================================
+#     # DIRECT TOOL ROUTING
+#     # =====================================================
 
 #     async def _detect_direct_tool(
 #         self,
-#         session: ClientSession,
-#         question: str,
-#     ) -> tuple[str | None, dict[str, Any]]:
-#         q = self._normalize_text(question)
+#         user_message: str,
+#         session,
+#     ):
 
-#         if (
-#             "list symbols" in q
-#             or "all symbols" in q
-#             or "stock symbols" in q
-#             or q in {"symbols", "symbol"}
-#         ):
-#             return "get_symbols", {}
+#         q = " ".join(
+#             user_message.lower().split()
+#         )
 
-#         if (
-#             "list industries" in q
-#             or "all industries" in q
-#             or q == "industries"
-#             or q == "industry"
-#         ):
-#             return "get_industries", {}
+#         # -------------------------------------------------
+#         # SYMBOLS
+#         # -------------------------------------------------
 
-#         industry = None
-
-#         if (
-#             "top change" in q
-#             or "top 10 change" in q
-#             or "highest change" in q
-#             or "top gainers" in q
-#             or "top gainer" in q
-#         ):
-#             industry = await self._find_industry_in_question(
-#                 session,
-#                 question,
+#         if any(
+#             word in q
+#             for word in (
+#                 "symbol",
+#                 "symbols",
+#                 "ticker",
+#                 "tickers",
 #             )
+#         ):
+
 #             return (
-#                 "get_top_change",
-#                 {"industry": industry} if industry else {},
+#                 "get_symbols",
+#                 {},
 #             )
 
-#         if (
-#             "bottom change" in q
-#             or "bottom 10 change" in q
-#             or "lowest change" in q
-#             or "top losers" in q
-#             or "losers" in q
-#         ):
-#             industry = await self._find_industry_in_question(
-#                 session,
-#                 question,
-#             )
-#             return (
-#                 "get_bottom_change",
-#                 {"industry": industry} if industry else {},
-#             )
+#         # -------------------------------------------------
+#         # RANKINGS FIRST
+#         # -------------------------------------------------
 
 #         if (
-#             "top volume" in q
-#             or "highest volume" in q
-#             or "most volume" in q
-#         ):
-#             industry = await self._find_industry_in_question(
-#                 session,
-#                 question,
+#             (
+#                 "top" in q
+#                 or "highest" in q
+#                 or "gainer" in q
+#                 or "gainers" in q
 #             )
+#             and "volume" in q
+#         ):
+
 #             return (
 #                 "get_top_volume",
-#                 {"industry": industry} if industry else {},
+#                 {},
 #             )
 
 #         if (
-#             "bottom volume" in q
-#             or "lowest volume" in q
-#             or "least volume" in q
-#         ):
-#             industry = await self._find_industry_in_question(
-#                 session,
-#                 question,
+#             (
+#                 "bottom" in q
+#                 or "lowest" in q
+#                 or "loser" in q
+#                 or "losers" in q
 #             )
+#             and "volume" in q
+#         ):
+
 #             return (
 #                 "get_bottom_volume",
-#                 {"industry": industry} if industry else {},
+#                 {},
 #             )
 
-#         return None, {}
+#         if (
+#             (
+#                 "top" in q
+#                 or "highest" in q
+#                 or "gainer" in q
+#                 or "gainers" in q
+#             )
+#             and (
+#                 "change" in q
+#                 or "percent" in q
+#                 or "%" in q
+#             )
+#         ):
 
-#     # ------------------------------------------------------------------
-#     # Tool schema conversion
-#     # ------------------------------------------------------------------
+#             return (
+#                 "get_top_change",
+#                 {},
+#             )
 
-#     def _openai_tools(self) -> list[dict[str, Any]]:
-#         openai_tools: list[dict[str, Any]] = []
+#         if (
+#             (
+#                 "bottom" in q
+#                 or "lowest" in q
+#                 or "loser" in q
+#                 or "losers" in q
+#             )
+#             and (
+#                 "change" in q
+#                 or "percent" in q
+#                 or "%" in q
+#             )
+#         ):
+
+#             return (
+#                 "get_bottom_change",
+#                 {},
+#             )
+
+#         # -------------------------------------------------
+#         # STOCK WORDS
+#         # -------------------------------------------------
+
+#         has_stock_word = any(
+#             word in q
+#             for word in (
+#                 "stock",
+#                 "stocks",
+#                 "share",
+#                 "shares",
+#                 "security",
+#                 "securities",
+#                 "company",
+#                 "companies",
+#             )
+#         )
+
+#         has_all_word = any(
+#             word in q
+#             for word in (
+#                 "all",
+#                 "every",
+#                 "list",
+#                 "show",
+#             )
+#         )
+
+#         # -------------------------------------------------
+#         # STOCK REQUESTS
+#         # -------------------------------------------------
+
+#         if has_stock_word:
+
+#             # Ask for a specific industry.
+#             if any(
+#                 phrase in q
+#                 for phrase in (
+#                     " in ",
+#                     " of ",
+#                     " from ",
+#                     "industry",
+#                     "sector",
+#                 )
+#             ):
+
+#                 industries_result = (
+#                     await self._call_tool(
+#                         session,
+#                         "get_industries",
+#                         {},
+#                     )
+#                 )
+
+#                 industries_data = (
+#                     self._extract_tool_result(
+#                         industries_result
+#                     )
+#                 )
+
+#                 industries = (
+#                     self._extract_industry_names(
+#                         industries_data
+#                     )
+#                 )
+
+#                 industry = (
+#                     self._find_industry_in_question(
+#                         user_message,
+#                         industries,
+#                     )
+#                 )
+
+#                 if industry:
+
+#                     return (
+#                         "get_stocks",
+#                         {
+#                             "industry": industry,
+#                         },
+#                     )
+
+#             # All stocks.
+#             if has_all_word:
+
+#                 return (
+#                     "__all_stocks__",
+#                     {},
+#                 )
+
+#         # -------------------------------------------------
+#         # INDUSTRIES
+#         # -------------------------------------------------
+
+#         if any(
+#             phrase in q
+#             for phrase in (
+#                 "list industries",
+#                 "list industry",
+#                 "all industries",
+#                 "all industry",
+#                 "available industries",
+#                 "available sectors",
+#                 "industry list",
+#                 "sector list",
+#                 "list sectors",
+#             )
+#         ):
+
+#             return (
+#                 "get_industries",
+#                 {},
+#             )
+
+#         return None
+
+#     # =====================================================
+#     # EXTRACT INDUSTRY NAMES
+#     # =====================================================
+
+#     def _extract_industry_names(
+#         self,
+#         data,
+#     ) -> list[str]:
+
+#         if isinstance(data, list):
+
+#             rows = data
+
+#         elif isinstance(data, dict):
+
+#             rows = []
+
+#             for key in (
+#                 "data",
+#                 "results",
+#                 "result",
+#                 "items",
+#                 "industries",
+#             ):
+
+#                 value = data.get(key)
+
+#                 if isinstance(value, list):
+
+#                     rows = value
+
+#                     break
+
+#         else:
+
+#             rows = []
+
+#         industries = []
+
+#         for item in rows:
+
+#             if isinstance(item, str):
+
+#                 value = item.strip()
+
+#                 if value:
+#                     industries.append(value)
+
+#             elif isinstance(item, dict):
+
+#                 for key in (
+#                     "industry",
+#                     "Industry",
+#                     "name",
+#                     "Name",
+#                 ):
+
+#                     value = item.get(key)
+
+#                     if value:
+
+#                         industries.append(
+#                             str(value).strip()
+#                         )
+
+#                         break
+
+#         # Remove duplicates while preserving order.
+#         unique = []
+
+#         seen = set()
+
+#         for industry in industries:
+
+#             normalized = self._normalize_text(
+#                 industry
+#             )
+
+#             if (
+#                 normalized
+#                 and normalized not in seen
+#             ):
+
+#                 seen.add(normalized)
+
+#                 unique.append(industry)
+
+#         return unique
+
+#     # =====================================================
+#     # MCP CONNECTION
+#     # =====================================================
+
+#     async def _connect_mcp(self):
+
+#         callback_server = (
+#             OAuthCallbackServer()
+#         )
+
+#         callback_server.start()
+
+#         oauth = create_oauth_provider(
+#             callback_server
+#         )
+
+#         http_client = httpx2.AsyncClient(
+
+#             auth=oauth,
+
+#             timeout=httpx2.Timeout(
+#                 30.0,
+#                 read=300.0,
+#             ),
+#         )
+
+#         return (
+#             callback_server,
+#             http_client,
+#         )
+
+#     # =====================================================
+#     # LOAD MCP TOOLS
+#     # =====================================================
+
+#     async def _load_tools(
+#         self,
+#         session,
+#     ):
+
+#         result = await session.list_tools()
+
+#         self.tools = result.tools
+
+#         self.tool_map = {
+#             tool.name: tool
+#             for tool in self.tools
+#         }
+
+#     # =====================================================
+#     # OPENAI TOOL FORMAT
+#     # =====================================================
+
+#     def _openai_tools(self):
+
+#         openai_tools = []
 
 #         for tool in self.tools:
+
 #             input_schema = getattr(
 #                 tool,
 #                 "inputSchema",
@@ -407,13 +885,15 @@
 #             )
 
 #             if input_schema is None:
+
 #                 input_schema = getattr(
 #                     tool,
 #                     "input_schema",
 #                     None,
 #                 )
 
-#             if not input_schema:
+#             if input_schema is None:
+
 #                 input_schema = {
 #                     "type": "object",
 #                     "properties": {},
@@ -425,8 +905,8 @@
 #                     "function": {
 #                         "name": tool.name,
 #                         "description": (
-#                             getattr(tool, "description", None)
-#                             or f"PSX MCP tool: {tool.name}"
+#                             tool.description
+#                             or f"MCP tool {tool.name}"
 #                         ),
 #                         "parameters": input_schema,
 #                     },
@@ -435,14 +915,1345 @@
 
 #         return openai_tools
 
-#     # ------------------------------------------------------------------
-#     # Result extraction / formatting
-#     # ------------------------------------------------------------------
+#     # =====================================================
+#     # CALL MCP TOOL
+#     # =====================================================
 
-#     def _extract_tool_result(self, result: Any) -> Any:
+#     async def _call_tool(
+#         self,
+#         session,
+#         tool_name: str,
+#         arguments: dict,
+#     ):
+
+#         self.last_tool = tool_name
+
+#         self.last_arguments = arguments
+
+#         result = await session.call_tool(
+#             tool_name,
+#             arguments,
+#         )
+
+#         # MCP tool-level error.
+#         if getattr(
+#             result,
+#             "is_error",
+#             False,
+#         ):
+
+#             content = getattr(
+#                 result,
+#                 "content",
+#                 [],
+#             )
+
+#             error_text = []
+
+#             for item in content:
+
+#                 text_value = getattr(
+#                     item,
+#                     "text",
+#                     None,
+#                 )
+
+#                 if text_value:
+
+#                     error_text.append(
+#                         str(text_value)
+#                     )
+
+#             message = (
+#                 "\n".join(error_text).strip()
+#                 or "Unknown MCP tool error."
+#             )
+
+#             raise RuntimeError(
+#                 f"{tool_name} failed: {message}"
+#             )
+
+#         return result
+
+#     # =====================================================
+#     # EXTRACT MCP RESULT
+#     # =====================================================
+
+#     def _extract_tool_result(
+#         self,
+#         result,
+#     ):
+
+#         if isinstance(
+#             result,
+#             (list, dict),
+#         ):
+
+#             return result
+
+#         # Preferred application data.
+#         structured = getattr(
+#             result,
+#             "structured_content",
+#             None,
+#         )
+
+#         if structured is not None:
+
+#             return structured
+
+#         structured = getattr(
+#             result,
+#             "structuredContent",
+#             None,
+#         )
+
+#         if structured is not None:
+
+#             return structured
+
+#         # Model/content representation.
+#         content = getattr(
+#             result,
+#             "content",
+#             None,
+#         )
+
+#         if content:
+
+#             collected_text = []
+
+#             for item in content:
+
+#                 text_value = getattr(
+#                     item,
+#                     "text",
+#                     None,
+#                 )
+
+#                 if text_value:
+
+#                     collected_text.append(
+#                         str(text_value)
+#                     )
+
+#             if collected_text:
+
+#                 combined_text = "\n".join(
+#                     collected_text
+#                 ).strip()
+
+#                 try:
+
+#                     return json.loads(
+#                         combined_text
+#                     )
+
+#                 except json.JSONDecodeError:
+
+#                     return combined_text
+
+#         model_dump = getattr(
+#             result,
+#             "model_dump",
+#             None,
+#         )
+
+#         if callable(model_dump):
+
+#             try:
+
+#                 dumped = model_dump()
+
+#                 if isinstance(
+#                     dumped,
+#                     (dict, list),
+#                 ):
+
+#                     return dumped
+
+#             except Exception:
+#                 pass
+
+#         return result
+
+#     # =====================================================
+#     # FORMAT MCP RESULT
+#     # =====================================================
+
+#     def _format_tool_result(
+#         self,
+#         tool_name: str,
+#         result,
+#         arguments: dict,
+#     ):
+
+#         raw_data = self._extract_tool_result(
+#             result
+#         )
+
+#         if tool_name == "get_symbols":
+
+#             return format_symbols(
+#                 raw_data
+#             )
+
+#         if tool_name == "get_industries":
+
+#             return format_industries(
+#                 raw_data
+#             )
+
+#         if tool_name == "get_stocks":
+
+#             return format_stock_data(
+#                 raw_data,
+#                 arguments.get(
+#                     "industry",
+#                     "",
+#                 ),
+#             )
+
+#         if tool_name in {
+#             "get_top_change",
+#             "get_bottom_change",
+#             "get_top_volume",
+#             "get_bottom_volume",
+#         }:
+
+#             return format_top_bottom(
+#                 raw_data,
+#                 tool_name,
+#             )
+
+#         return json.dumps(
+#             raw_data,
+#             ensure_ascii=False,
+#             default=str,
+#         )
+
+#     # =====================================================
+#     # ALL STOCKS
+#     # =====================================================
+
+#     async def _get_all_stocks(
+#         self,
+#         session,
+#     ) -> tuple[str, dict]:
+
+#         # First get the valid industry names.
+#         industries_result = (
+#             await self._call_tool(
+#                 session,
+#                 "get_industries",
+#                 {},
+#             )
+#         )
+
+#         industries_data = (
+#             self._extract_tool_result(
+#                 industries_result
+#             )
+#         )
+
+#         industries = (
+#             self._extract_industry_names(
+#                 industries_data
+#             )
+#         )
+
+#         if not industries:
+
+#             raise RuntimeError(
+#                 "MCP returned no industries, "
+#                 "so all stocks could not be loaded."
+#             )
+
+#         all_rows = []
+
+#         for industry in industries:
+
+#             result = await self._call_tool(
+#                 session,
+#                 "get_stocks",
+#                 {
+#                     "industry": industry,
+#                 },
+#             )
+
+#             data = self._extract_tool_result(
+#                 result
+#             )
+
+#             rows = self._data_rows(
+#                 data
+#             )
+
+#             for row in rows:
+
+#                 if isinstance(row, dict):
+
+#                     item = dict(row)
+
+#                     if not item.get(
+#                         "industry"
+#                     ):
+
+#                         item["industry"] = industry
+
+#                     all_rows.append(item)
+
+#         # Deduplicate by symbol.
+#         unique_rows = []
+
+#         seen_symbols = set()
+
+#         for row in all_rows:
+
+#             symbol = (
+#                 row.get("symbol")
+#                 or row.get("Symbol")
+#                 or row.get("ticker")
+#                 or row.get("Ticker")
+#             )
+
+#             if symbol:
+
+#                 key = str(
+#                     symbol
+#                 ).strip().upper()
+
+#             else:
+
+#                 key = json.dumps(
+#                     row,
+#                     sort_keys=True,
+#                     default=str,
+#                 )
+
+#             if key in seen_symbols:
+
+#                 continue
+
+#             seen_symbols.add(key)
+
+#             unique_rows.append(row)
+
+#         self.last_tool = "get_stocks"
+
+#         self.last_arguments = {
+#             "industry": "ALL",
+#             "industries_requested": len(
+#                 industries
+#             ),
+#         }
+
+#         return (
+#             format_stock_data(
+#                 unique_rows
+#             ),
+#             self.last_arguments,
+#         )
+
+#     # =====================================================
+#     # EXTRACT ROWS
+#     # =====================================================
+
+#     def _data_rows(
+#         self,
+#         data,
+#     ) -> list:
+
+#         if isinstance(
+#             data,
+#             list,
+#         ):
+
+#             return data
+
+#         if isinstance(
+#             data,
+#             dict,
+#         ):
+
+#             for key in (
+#                 "data",
+#                 "results",
+#                 "result",
+#                 "items",
+#                 "stocks",
+#                 "records",
+#             ):
+
+#                 value = data.get(key)
+
+#                 if isinstance(
+#                     value,
+#                     list,
+#                 ):
+
+#                     return value
+
+#                 if isinstance(
+#                     value,
+#                     dict,
+#                 ):
+
+#                     nested = self._data_rows(
+#                         value
+#                     )
+
+#                     if nested:
+
+#                         return nested
+
+#             # Single stock object.
+#             if any(
+#                 key in data
+#                 for key in (
+#                     "symbol",
+#                     "Symbol",
+#                     "ticker",
+#                     "Ticker",
+#                 )
+#             ):
+
+#                 return [data]
+
+#         return []
+
+#     # =====================================================
+#     # SYSTEM PROMPT
+#     # =====================================================
+
+#     def _system_prompt(self):
+
+#         return """
+# You are the PSX Chatbot.
+
+# You answer Pakistan Stock Exchange questions
+# using MCP tools.
+
+# IMPORTANT:
+
+# - Never invent PSX data.
+# - MCP results are the source of truth.
+# - Always use an MCP tool for PSX market data.
+# - Do not answer PSX market-data questions from memory.
+
+# Tool rules:
+
+# get_symbols:
+# Use for symbols and tickers.
+
+# get_industries:
+# Use for industries and sectors.
+
+# get_stocks:
+# Use for stock listings.
+# The industry argument is REQUIRED.
+# If an industry is specified, pass the exact
+# industry name returned by get_industries.
+
+# get_top_change:
+# Use for top gainers/change percentage.
+
+# get_bottom_change:
+# Use for bottom/lowest change percentage.
+
+# get_top_volume:
+# Use for highest trading volume.
+
+# get_bottom_volume:
+# Use for lowest trading volume.
+
+# Do not provide investment guarantees.
+# Do not provide personalized financial advice.
+
+# Keep answers concise and preserve numerical values.
+# """
+
+#     # =====================================================
+#     # LLM CALL
+#     # =====================================================
+
+#     async def _ask_llm(
+#         self,
+#         client,
+#         messages,
+#     ):
+
+#         return await client.chat.completions.create(
+
+#             model=LLM_MODEL,
+
+#             messages=messages,
+
+#             tools=self._openai_tools(),
+
+#             tool_choice="auto",
+
+#             temperature=0,
+#         )
+
+#     # =====================================================
+#     # CHAT
+#     # =====================================================
+
+#     async def _chat_async(
+#         self,
+#         user_message: str,
+#     ):
+
+#         callback_server = None
+#         http_client = None
+
+#         try:
+
+#             (
+#                 callback_server,
+#                 http_client,
+#             ) = await self._connect_mcp()
+
+#             async with http_client:
+
+#                 async with streamable_http_client(
+#                     MCP_SERVER_URL,
+#                     http_client=http_client,
+#                 ) as (
+#                     read_stream,
+#                     write_stream,
+#                 ):
+
+#                     async with ClientSession(
+#                         read_stream,
+#                         write_stream,
+#                     ) as session:
+
+#                         await session.initialize()
+
+#                         await self._load_tools(
+#                             session
+#                         )
+
+#                         # ---------------------------------
+#                         # DIRECT ROUTING
+#                         # ---------------------------------
+
+#                         direct_tool = (
+#                             await self._detect_direct_tool(
+#                                 user_message,
+#                                 session,
+#                             )
+#                         )
+
+#                         if direct_tool:
+
+#                             (
+#                                 tool_name,
+#                                 arguments,
+#                             ) = direct_tool
+
+#                             # ALL STOCKS
+#                             if tool_name == "__all_stocks__":
+
+#                                 answer, arguments = (
+#                                     await self._get_all_stocks(
+#                                         session
+#                                     )
+#                                 )
+
+#                                 self.conversation_history.append(
+#                                     {
+#                                         "role": "user",
+#                                         "content": user_message,
+#                                     }
+#                                 )
+
+#                                 self.conversation_history.append(
+#                                     {
+#                                         "role": "assistant",
+#                                         "content": answer,
+#                                     }
+#                                 )
+
+#                                 return {
+#                                     "answer": answer,
+#                                     "tool": self.last_tool,
+#                                     "arguments": arguments,
+#                                 }
+
+#                             if (
+#                                 tool_name
+#                                 not in self.tool_map
+#                             ):
+
+#                                 raise RuntimeError(
+#                                     f"MCP tool "
+#                                     f"'{tool_name}' "
+#                                     f"was not found."
+#                                 )
+
+#                             result = (
+#                                 await self._call_tool(
+#                                     session,
+#                                     tool_name,
+#                                     arguments,
+#                                 )
+#                             )
+
+#                             answer = (
+#                                 self._format_tool_result(
+#                                     tool_name,
+#                                     result,
+#                                     arguments,
+#                                 )
+#                             )
+
+#                             self.conversation_history.append(
+#                                 {
+#                                     "role": "user",
+#                                     "content": user_message,
+#                                 }
+#                             )
+
+#                             self.conversation_history.append(
+#                                 {
+#                                     "role": "assistant",
+#                                     "content": answer,
+#                                 }
+#                             )
+
+#                             return {
+#                                 "answer": answer,
+#                                 "tool": self.last_tool,
+#                                 "arguments": self.last_arguments,
+#                             }
+
+#                         # ---------------------------------
+#                         # LLM FALLBACK
+#                         # ---------------------------------
+
+#                         llm_client = (
+#                             create_llm_client()
+#                         )
+
+#                         messages = [
+#                             {
+#                                 "role": "system",
+#                                 "content": (
+#                                     self._system_prompt()
+#                                 ),
+#                             }
+#                         ]
+
+#                         messages.extend(
+#                             self.conversation_history
+#                         )
+
+#                         messages.append(
+#                             {
+#                                 "role": "user",
+#                                 "content": user_message,
+#                             }
+#                         )
+
+#                         # ---------------------------------
+#                         # TOOL-CALLING LOOP
+#                         # ---------------------------------
+
+#                         for _ in range(6):
+
+#                             response = (
+#                                 await self._ask_llm(
+#                                     llm_client,
+#                                     messages,
+#                                 )
+#                             )
+
+#                             message = (
+#                                 response.choices[
+#                                     0
+#                                 ].message
+#                             )
+
+#                             tool_calls = (
+#                                 message.tool_calls
+#                             )
+
+#                             # ---------------------------------
+#                             # FINAL ANSWER
+#                             # ---------------------------------
+
+#                             if not tool_calls:
+
+#                                 final_answer = (
+#                                     message.content
+#                                     or "I could not generate a response."
+#                                 )
+
+#                                 self.conversation_history.append(
+#                                     {
+#                                         "role": "user",
+#                                         "content": user_message,
+#                                     }
+#                                 )
+
+#                                 self.conversation_history.append(
+#                                     {
+#                                         "role": "assistant",
+#                                         "content": final_answer,
+#                                     }
+#                                 )
+
+#                                 return {
+#                                     "answer": final_answer,
+#                                     "tool": self.last_tool,
+#                                     "arguments": self.last_arguments,
+#                                 }
+
+#                             # ---------------------------------
+#                             # ASSISTANT TOOL CALLS
+#                             # ---------------------------------
+
+#                             assistant_tool_calls = []
+
+#                             for call in tool_calls:
+
+#                                 assistant_tool_calls.append(
+#                                     {
+#                                         "id": call.id,
+#                                         "type": "function",
+#                                         "function": {
+#                                             "name": (
+#                                                 call.function.name
+#                                             ),
+#                                             "arguments": (
+#                                                 call.function.arguments
+#                                             ),
+#                                         },
+#                                     }
+#                                 )
+
+#                             messages.append(
+#                                 {
+#                                     "role": "assistant",
+#                                     "content": (
+#                                         message.content
+#                                         or None
+#                                     ),
+#                                     "tool_calls": (
+#                                         assistant_tool_calls
+#                                     ),
+#                                 }
+#                             )
+
+#                             # ---------------------------------
+#                             # EXECUTE TOOLS
+#                             # ---------------------------------
+
+#                             for call in tool_calls:
+
+#                                 tool_name = (
+#                                     call.function.name
+#                                 )
+
+#                                 try:
+
+#                                     arguments = json.loads(
+#                                         call.function.arguments
+#                                     )
+
+#                                 except (
+#                                     json.JSONDecodeError,
+#                                 ):
+
+#                                     arguments = {}
+
+#                                 # ---------------------------------
+#                                 # SAFETY: get_stocks REQUIRES
+#                                 # industry.
+#                                 # ---------------------------------
+
+#                                 if (
+#                                     tool_name == "get_stocks"
+#                                     and not arguments.get(
+#                                         "industry"
+#                                     )
+#                                 ):
+
+#                                     tool_output = (
+#                                         "The get_stocks MCP tool "
+#                                         "requires an industry."
+#                                     )
+
+#                                 elif (
+#                                     tool_name
+#                                     not in self.tool_map
+#                                 ):
+
+#                                     tool_output = (
+#                                         f"Unknown MCP tool: "
+#                                         f"{tool_name}"
+#                                     )
+
+#                                 else:
+
+#                                     result = (
+#                                         await self._call_tool(
+#                                             session,
+#                                             tool_name,
+#                                             arguments,
+#                                         )
+#                                     )
+
+#                                     tool_output = (
+#                                         self._format_tool_result(
+#                                             tool_name,
+#                                             result,
+#                                             arguments,
+#                                         )
+#                                     )
+
+#                                 messages.append(
+#                                     {
+#                                         "role": "tool",
+#                                         "tool_call_id": call.id,
+#                                         "content": str(
+#                                             tool_output
+#                                         ),
+#                                     }
+#                                 )
+
+#                         return {
+#                             "answer": (
+#                                 "I could not complete "
+#                                 "the PSX request."
+#                             ),
+#                             "tool": self.last_tool,
+#                             "arguments": self.last_arguments,
+#                         }
+
+#         except Exception as exc:
+
+#             root = exc
+
+#             while (
+#                 hasattr(root, "exceptions")
+#                 and root.exceptions
+#             ):
+
+#                 root = root.exceptions[0]
+
+#             raise RuntimeError(
+#                 "MCP chatbot error: "
+#                 f"{type(root).__name__}: {root}"
+#             ) from exc
+
+#         finally:
+
+#             if callback_server is not None:
+
+#                 callback_server.stop()
+
+#     # =====================================================
+#     # PUBLIC CHAT
+#     # =====================================================
+
+#     def chat(
+#         self,
+#         user_message: str,
+#     ):
+
+#         return asyncio.run(
+#             self._chat_async(
+#                 user_message
+#             )
+#         )
+
+
+# # =========================================================
+# # GLOBAL CHATBOT INSTANCE
+# # =========================================================
+
+# _CHATBOT = PSXChatbot()
+
+
+# # =========================================================
+# # STREAMLIT ENTRY POINT
+# # =========================================================
+
+# def ask_chatbot(
+#     user_message: str,
+#     history=None,
+# ) -> dict:
+
+#     if history is not None:
+
+#         _CHATBOT.conversation_history = []
+
+#         for item in history:
+
+#             if not isinstance(
+#                 item,
+#                 dict,
+#             ):
+
+#                 continue
+
+#             role = item.get(
+#                 "role"
+#             )
+
+#             content = item.get(
+#                 "content"
+#             )
+
+#             if (
+#                 role in {
+#                     "user",
+#                     "assistant",
+#                 }
+#                 and content
+#             ):
+
+#                 _CHATBOT.conversation_history.append(
+#                     {
+#                         "role": role,
+#                         "content": str(content),
+#                     }
+#                 )
+
+#     return _CHATBOT.chat(
+#         user_message
+#     )
+
+
+
+# from __future__ import annotations
+
+# import asyncio
+# import difflib
+# import json
+# import os
+# import re
+
+# import httpx
+# from dotenv import load_dotenv
+# from mcp import ClientSession
+# from mcp.client.streamable_http import streamable_http_client
+
+# from chatbot.formatters import (
+#     format_industries,
+#     format_stock_data,
+#     format_symbols,
+#     format_top_bottom,
+# )
+
+# from chatbot.llm import create_llm_client
+
+
+# load_dotenv()
+
+
+# # ============================================================
+# # CONFIGURATION
+# # ============================================================
+
+# MCP_SERVER_URL = os.getenv(
+#     "MCP_SERVER_URL",
+#     "https://fluttering-blue-ox.fastmcp.app/mcp",
+# )
+
+# LLM_PROVIDER = os.getenv(
+#     "LLM_PROVIDER",
+#     "groq",
+# ).lower()
+
+# LLM_MODEL = os.getenv(
+#     "LLM_MODEL",
+#     "openai/gpt-oss-120b",
+# )
+
+
+# # ============================================================
+# # PSX CHATBOT
+# # ============================================================
+
+# class PSXChatbot:
+
+#     def __init__(self):
+#         self.tools = []
+#         self.tool_map = {}
+
+#         self.last_tool = None
+#         self.last_arguments = {}
+
+#         self.conversation_history = []
+
+#     # ========================================================
+#     # TEXT HELPERS
+#     # ========================================================
+
+#     @staticmethod
+#     def _normalize_text(text: str) -> str:
+#         text = text.lower().strip()
+#         text = re.sub(r"\s+", " ", text)
+#         return text
+
+#     # ========================================================
+#     # INDUSTRY DETECTION
+#     # ========================================================
+
+#     def _find_industry_in_question(self, question: str) -> str | None:
+#         question_normalized = self._normalize_text(question)
+
+#         if not self.tools:
+#             return None
+
+#         industry_tool = self.tool_map.get("get_industries")
+
+#         if not industry_tool:
+#             return None
+
+#         try:
+#             result = self._call_tool_sync(
+#                 "get_industries",
+#                 {},
+#             )
+
+#             industries = self._extract_tool_result(result)
+
+#             if isinstance(industries, dict):
+#                 possible_industries = (
+#                     industries.get("industries")
+#                     or industries.get("data")
+#                     or []
+#                 )
+#             elif isinstance(industries, list):
+#                 possible_industries = industries
+#             else:
+#                 possible_industries = []
+
+#             normalized_map = {}
+
+#             for item in possible_industries:
+
+#                 if isinstance(item, dict):
+#                     name = (
+#                         item.get("industry")
+#                         or item.get("name")
+#                         or item.get("sector")
+#                     )
+#                 else:
+#                     name = str(item)
+
+#                 if name:
+#                     normalized_map[
+#                         self._normalize_text(name)
+#                     ] = name
+
+#             # Exact match
+#             for normalized_name, original_name in normalized_map.items():
+
+#                 if normalized_name in question_normalized:
+#                     return original_name
+
+#             # Fuzzy matching
+#             words = question_normalized.split()
+
+#             for normalized_name, original_name in normalized_map.items():
+
+#                 ratio = difflib.SequenceMatcher(
+#                     None,
+#                     normalized_name,
+#                     question_normalized,
+#                 ).ratio()
+
+#                 if ratio >= 0.70:
+#                     return original_name
+
+#                 if len(words) > 1:
+
+#                     for word in words:
+
+#                         if len(word) < 4:
+#                             continue
+
+#                         ratio = difflib.SequenceMatcher(
+#                             None,
+#                             normalized_name,
+#                             word,
+#                         ).ratio()
+
+#                         if ratio >= 0.85:
+#                             return original_name
+
+#         except Exception:
+#             return None
+
+#         return None
+
+#     # ========================================================
+#     # DIRECT TOOL DETECTION
+#     # ========================================================
+
+#     def _detect_direct_tool(
+#         self,
+#         question: str,
+#     ) -> tuple[str | None, dict]:
+
+#         q = self._normalize_text(question)
+
+#         # Symbols
+#         if (
+#             "list symbols" in q
+#             or "all symbols" in q
+#             or "stock symbols" in q
+#             or q in {"symbols", "symbol"}
+#         ):
+#             return "get_symbols", {}
+
+#         # Industries
+#         if (
+#             "list industries" in q
+#             or "all industries" in q
+#             or "industries" in q
+#             or q == "industry"
+#         ):
+#             return "get_industries", {}
+
+#         # Top change
+#         if (
+#             "top change" in q
+#             or "top 10 change" in q
+#             or "highest change" in q
+#             or "top gainers" in q
+#             or "top gainer" in q
+#         ):
+#             industry = self._find_industry_in_question(question)
+
+#             arguments = {}
+
+#             if industry:
+#                 arguments["industry"] = industry
+
+#             return "get_top_change", arguments
+
+#         # Bottom change
+#         if (
+#             "bottom change" in q
+#             or "bottom 10 change" in q
+#             or "lowest change" in q
+#             or "top losers" in q
+#             or "losers" in q
+#         ):
+#             industry = self._find_industry_in_question(question)
+
+#             arguments = {}
+
+#             if industry:
+#                 arguments["industry"] = industry
+
+#             return "get_bottom_change", arguments
+
+#         # Top volume
+#         if (
+#             "top volume" in q
+#             or "highest volume" in q
+#             or "most volume" in q
+#         ):
+#             industry = self._find_industry_in_question(question)
+
+#             arguments = {}
+
+#             if industry:
+#                 arguments["industry"] = industry
+
+#             return "get_top_volume", arguments
+
+#         # Bottom volume
+#         if (
+#             "bottom volume" in q
+#             or "lowest volume" in q
+#             or "least volume" in q
+#         ):
+#             industry = self._find_industry_in_question(question)
+
+#             arguments = {}
+
+#             if industry:
+#                 arguments["industry"] = industry
+
+#             return "get_bottom_volume", arguments
+
+#         return None, {}
+
+#     # ========================================================
+#     # INDUSTRY EXTRACTION
+#     # ========================================================
+
+#     def _extract_industry_names(
+#         self,
+#         question: str,
+#     ) -> list[str]:
+
+#         industry = self._find_industry_in_question(question)
+
+#         if industry:
+#             return [industry]
+
+#         return []
+
+#     # ========================================================
+#     # MCP CONNECTION
+#     # ========================================================
+
+#     async def _connect_mcp(self):
+
+#         return httpx.AsyncClient(
+#             timeout=httpx.Timeout(
+#                 30.0,
+#                 read=300.0,
+#             ),
+#         )
+
+#     # ========================================================
+#     # LOAD MCP TOOLS
+#     # ========================================================
+
+#     async def _load_tools(
+#         self,
+#         session: ClientSession,
+#     ):
+
+#         response = await session.list_tools()
+
+#         self.tools = response.tools
+
+#         self.tool_map = {
+#             tool.name: tool
+#             for tool in self.tools
+#         }
+
+#         return self.tools
+
+#     # ========================================================
+#     # OPENAI TOOL FORMAT
+#     # ========================================================
+
+#     def _openai_tools(self):
+
+#         openai_tools = []
+
+#         for tool in self.tools:
+
+#             input_schema = getattr(
+#                 tool,
+#                 "inputSchema",
+#                 None,
+#             )
+
+#             if input_schema is None:
+#                 input_schema = {}
+
+#             openai_tools.append(
+#                 {
+#                     "type": "function",
+#                     "function": {
+#                         "name": tool.name,
+#                         "description": (
+#                             getattr(
+#                                 tool,
+#                                 "description",
+#                                 None,
+#                             )
+#                             or ""
+#                         ),
+#                         "parameters": input_schema,
+#                     },
+#                 }
+#             )
+
+#         return openai_tools
+
+#     # ========================================================
+#     # MCP TOOL CALL
+#     # ========================================================
+
+#     async def _call_tool(
+#         self,
+#         session: ClientSession,
+#         tool_name: str,
+#         arguments: dict | None = None,
+#     ):
+
+#         if arguments is None:
+#             arguments = {}
+
+#         self.last_tool = tool_name
+#         self.last_arguments = arguments
+
+#         result = await session.call_tool(
+#             tool_name,
+#             arguments=arguments,
+#         )
+
+#         return result
+
+#     # ========================================================
+#     # SYNC TOOL HELPER
+#     # ========================================================
+
+#     def _call_tool_sync(
+#         self,
+#         tool_name: str,
+#         arguments: dict,
+#     ):
+
+#         async def runner():
+
+#             http_client = await self._connect_mcp()
+
+#             try:
+
+#                 async with streamable_http_client(
+#                     MCP_SERVER_URL,
+#                     http_client=http_client,
+#                 ) as (
+#                     read_stream,
+#                     write_stream,
+#                 ):
+
+#                     async with ClientSession(
+#                         read_stream,
+#                         write_stream,
+#                     ) as session:
+
+#                         await session.initialize()
+
+#                         return await self._call_tool(
+#                             session,
+#                             tool_name,
+#                             arguments,
+#                         )
+
+#             finally:
+
+#                 await http_client.aclose()
+
+#         return asyncio.run(runner())
+
+#     # ========================================================
+#     # EXTRACT MCP RESULT
+#     # ========================================================
+
+#     def _extract_tool_result(self, result):
+
 #         if result is None:
 #             return None
 
+#         # MCP result usually contains content
 #         content = getattr(
 #             result,
 #             "content",
@@ -452,57 +2263,51 @@
 #         if content is None:
 #             return result
 
-#         structured = getattr(
-#             result,
-#             "structuredContent",
-#             None,
-#         )
-
-#         if structured is None:
-#             structured = getattr(
-#                 result,
-#                 "structured_content",
-#                 None,
-#             )
-
-#         if structured is not None:
-#             return structured
-
-#         extracted: list[Any] = []
+#         extracted = []
 
 #         for item in content:
-#             text_value = getattr(
+
+#             text = getattr(
 #                 item,
 #                 "text",
 #                 None,
 #             )
 
-#             if text_value is not None:
-#                 extracted.append(text_value)
-#             else:
-#                 extracted.append(item)
+#             if text is not None:
+#                 extracted.append(text)
+#                 continue
+
+#             extracted.append(item)
 
 #         if len(extracted) == 1:
+
 #             value = extracted[0]
 
 #             if isinstance(value, str):
+
 #                 try:
 #                     return json.loads(value)
-#                 except (json.JSONDecodeError, TypeError):
+#                 except Exception:
 #                     return value
 
 #             return value
 
 #         return extracted
 
+#     # ========================================================
+#     # FORMAT TOOL RESULT
+#     # ========================================================
+
 #     def _format_tool_result(
 #         self,
 #         tool_name: str,
-#         result: Any,
-#     ) -> str:
+#         result,
+#     ):
+
 #         data = self._extract_tool_result(result)
 
 #         try:
+
 #             if tool_name == "get_symbols":
 #                 return format_symbols(data)
 
@@ -524,7 +2329,7 @@
 #                 )
 
 #         except Exception:
-#             # Do not allow a presentation formatter to break the agent.
+
 #             pass
 
 #         if isinstance(data, str):
@@ -533,131 +2338,245 @@
 #         try:
 #             return json.dumps(
 #                 data,
-#                 ensure_ascii=False,
+#                 indent=2,
 #                 default=str,
 #             )
-#         except (TypeError, ValueError):
+#         except Exception:
 #             return str(data)
 
-#     def _tool_result_for_llm(
+#     # ========================================================
+#     # GET ALL STOCKS
+#     # ========================================================
+
+#     async def _get_all_stocks(
 #         self,
-#         tool_name: str,
-#         result: Any,
-#     ) -> str:
-#         """
-#         Send compact structured data to the LLM when possible.
-#         The user-facing formatter remains separate.
-#         """
-#         data = self._extract_tool_result(result)
+#         session: ClientSession,
+#     ):
 
-#         try:
-#             return json.dumps(
-#                 {
-#                     "tool": tool_name,
-#                     "data": data,
-#                 },
-#                 ensure_ascii=False,
-#                 default=str,
+#         industries_result = await self._call_tool(
+#             session,
+#             "get_industries",
+#             {},
+#         )
+
+#         industries_data = self._extract_tool_result(
+#             industries_result
+#         )
+
+#         if isinstance(industries_data, dict):
+
+#             industries = (
+#                 industries_data.get("industries")
+#                 or industries_data.get("data")
+#                 or []
 #             )
-#         except (TypeError, ValueError):
-#             return str(data)
 
-#     # ------------------------------------------------------------------
-#     # Prompt
-#     # ------------------------------------------------------------------
+#         elif isinstance(industries_data, list):
 
-#     @staticmethod
-#     def _system_prompt() -> str:
+#             industries = industries_data
+
+#         else:
+
+#             industries = []
+
+#         all_stocks = []
+
+#         for item in industries:
+
+#             if isinstance(item, dict):
+
+#                 industry = (
+#                     item.get("industry")
+#                     or item.get("name")
+#                     or item.get("sector")
+#                 )
+
+#             else:
+
+#                 industry = str(item)
+
+#             if not industry:
+#                 continue
+
+#             try:
+
+#                 result = await self._call_tool(
+#                     session,
+#                     "get_stocks",
+#                     {
+#                         "industry": industry,
+#                     },
+#                 )
+
+#                 data = self._extract_tool_result(
+#                     result
+#                 )
+
+#                 if isinstance(data, list):
+#                     all_stocks.extend(data)
+
+#                 elif isinstance(data, dict):
+
+#                     rows = (
+#                         data.get("data")
+#                         or data.get("stocks")
+#                         or data.get("results")
+#                         or []
+#                     )
+
+#                     if isinstance(rows, list):
+#                         all_stocks.extend(rows)
+
+#             except Exception:
+
+#                 continue
+
+#         return all_stocks
+
+#     # ========================================================
+#     # DATA ROWS
+#     # ========================================================
+
+#     def _data_rows(self, data):
+
+#         if isinstance(data, list):
+#             return data
+
+#         if isinstance(data, dict):
+
+#             for key in (
+#                 "data",
+#                 "stocks",
+#                 "results",
+#                 "rows",
+#             ):
+
+#                 value = data.get(key)
+
+#                 if isinstance(value, list):
+#                     return value
+
+#         return []
+
+#     # ========================================================
+#     # SYSTEM PROMPT
+#     # ========================================================
+
+#     def _system_prompt(self):
+
 #         return """
-# You are a PSX data chatbot. You have access to MCP tools containing the current PSX dataset.
+# You are a professional Pakistan Stock Exchange (PSX) chatbot.
 
-# Rules:
-# 1. Use MCP tools for any PSX fact; never answer market data from memory.
-# 2. Use only the supplied MCP tools and their actual results.
-# 3. Never invent, rename, or guess symbols, industries, prices, change %, volume, or company data.
-# 4. For an industry request, use the exact industry value returned by `get_industries`.
-# 5. Natural-language industry terms may be normalized only when they map clearly to one live industry.
-# 6. If a term matches multiple live industries, do not guess; ask the user to specify.
-# 7. Example: "banking" → "COMMERCIAL BANKS". "technology" → "TECHNOLOGY & COMMUNICATION".
-# 8. Example: "textile" is ambiguous when TEXTILE COMPOSITE, TEXTILE SPINNING, and TEXTILE WEAVING all exist; ask which one.
-# 9. For ranking requests, preserve the tool's ranking direction and returned values exactly.
-# 10. Use conversation history for follow-up context when the user's subject is clear.
-# 11. Do not call tools for greetings or casual conversation.
-# 12. After receiving tool data, answer directly and concisely. Use a table for multiple stocks when useful.
-# 13. If tool data is missing or a tool fails, state that the requested PSX data could not be retrieved. Do not fabricate a result.
-# 14. You are a PSX data assistant, not a financial advisor.
-# """.strip()
+# Your job is to answer user questions using live PSX data obtained
+# through MCP tools.
 
-#     # ------------------------------------------------------------------
-#     # LLM
-#     # ------------------------------------------------------------------
+# Important rules:
+
+# 1. Use MCP tools whenever live PSX data is required.
+# 2. Never invent stock prices, changes, volumes, symbols, industries,
+#    or other financial information.
+# 3. If the user asks for current/live PSX information, fetch the
+#    information using the appropriate MCP tool.
+# 4. For industry-specific questions, use the industry provided by
+#    the user.
+# 5. When comparing stocks, clearly identify the relevant metrics.
+# 6. Keep answers clear and concise.
+# 7. If the requested information is unavailable, clearly say so.
+# 8. Do not claim that data is real-time unless the MCP/API actually
+#    provides current data.
+# 9. You are a chatbot, not a human financial advisor.
+# 10. Do not fabricate analysis when the required data is unavailable.
+
+# Available MCP tools can provide:
+
+# - PSX symbols
+# - PSX industries
+# - Stocks by industry
+# - Top stocks by Change %
+# - Bottom stocks by Change %
+# - Top stocks by Volume
+# - Bottom stocks by Volume
+# """
+
+#     # ========================================================
+#     # LLM REQUEST
+#     # ========================================================
 
 #     async def _ask_llm(
 #         self,
-#         client: Any,
-#         messages: list[dict[str, Any]],
-#         tools: list[dict[str, Any]],
-#     ) -> Any:
-#         return await client.chat.completions.create(
+#         client,
+#         messages,
+#         tools,
+#     ):
+
+#         response = await client.chat.completions.create(
 #             model=LLM_MODEL,
 #             messages=messages,
-#             tools=tools or None,
+#             tools=tools if tools else None,
 #             tool_choice="auto" if tools else None,
 #         )
 
-#     @staticmethod
-#     def _parse_tool_arguments(
-#         raw_arguments: str | None,
-#     ) -> dict[str, Any]:
-#         raw_arguments = raw_arguments or "{}"
+#         return response
 
-#         try:
-#             parsed = json.loads(raw_arguments)
-#         except json.JSONDecodeError as exc:
-#             raise ValueError(
-#                 f"Invalid JSON tool arguments: {exc}"
-#             ) from exc
-
-#         if not isinstance(parsed, dict):
-#             raise ValueError(
-#                 "Tool arguments must be a JSON object."
-#             )
-
-#         return parsed
-
-#     # ------------------------------------------------------------------
-#     # Main async flow
-#     # ------------------------------------------------------------------
+#     # ========================================================
+#     # MAIN ASYNC CHAT
+#     # ========================================================
 
 #     async def _chat_async(
 #         self,
 #         user_message: str,
 #         history: list | None = None,
-#     ) -> str:
-#         self.last_tool = None
-#         self.last_arguments = {}
-#         self.last_debug = None
+#     ):
+
+#         http_client = None
 
 #         try:
 
-#             async with mcp_session() as session:
+#             # ------------------------------------------------
+#             # CONNECT TO MCP
+#             # ------------------------------------------------
 
+#             http_client = await self._connect_mcp()
+
+#             async with streamable_http_client(
+#                 MCP_SERVER_URL,
+#                 http_client=http_client,
+#             ) as (
+#                 read_stream,
+#                 write_stream,
+#             ):
+
+#                 async with ClientSession(
+#                     read_stream,
+#                     write_stream,
+#                 ) as session:
+
+#                     # ----------------------------------------
+#                     # INITIALIZE MCP
+#                     # ----------------------------------------
+
+#                     await session.initialize()
+
+#                     # ----------------------------------------
+#                     # LOAD TOOLS
+#                     # ----------------------------------------
 
 #                     await self._load_tools(session)
 
-#                     # --------------------------------------------------
-#                     # Deterministic route for common PSX requests.
-#                     # Crucially, this uses the SAME async MCP session.
-#                     # --------------------------------------------------
+#                     # ----------------------------------------
+#                     # DIRECT TOOL ROUTING
+#                     # ----------------------------------------
+
 #                     direct_tool, direct_arguments = (
-#                         await self._detect_direct_tool(
-#                             session,
-#                             user_message,
+#                         self._detect_direct_tool(
+#                             user_message
 #                         )
 #                     )
 
 #                     if direct_tool:
+
 #                         try:
+
 #                             result = await self._call_tool(
 #                                 session,
 #                                 direct_tool,
@@ -669,14 +2588,30 @@
 #                                 result,
 #                             )
 
-#                         except Exception:
-#                             # Fall through to the LLM route.
-#                             pass
+#                         except Exception as direct_error:
+
+#                             # If direct routing fails,
+#                             # continue to LLM route.
+
+#                             direct_error_text = str(
+#                                 direct_error
+#                             )
+
+#                     else:
+
+#                         direct_error_text = None
+
+#                     # ----------------------------------------
+#                     # LLM CLIENT
+#                     # ----------------------------------------
 
 #                     llm_client = create_llm_client()
-#                     openai_tools = self._openai_tools()
 
-#                     messages: list[dict[str, Any]] = [
+#                     # ----------------------------------------
+#                     # HISTORY
+#                     # ----------------------------------------
+
+#                     messages = [
 #                         {
 #                             "role": "system",
 #                             "content": self._system_prompt(),
@@ -684,21 +2619,24 @@
 #                     ]
 
 #                     if history:
+
 #                         for item in history:
+
 #                             if not isinstance(item, dict):
 #                                 continue
 
 #                             role = item.get("role")
 #                             content = item.get("content")
 
-#                             if (
-#                                 role in {"user", "assistant"}
-#                                 and content
-#                             ):
+#                             if role in {
+#                                 "user",
+#                                 "assistant",
+#                             } and content:
+
 #                                 messages.append(
 #                                     {
 #                                         "role": role,
-#                                         "content": str(content),
+#                                         "content": content,
 #                                     }
 #                                 )
 
@@ -709,188 +2647,239 @@
 #                         }
 #                     )
 
-#                     total_tool_calls = 0
+#                     # ----------------------------------------
+#                     # TOOL-CALLING LOOP
+#                     # ----------------------------------------
 
-#                     for _ in range(MAX_TOOL_ITERATIONS):
+#                     openai_tools = self._openai_tools()
+
+#                     max_iterations = 6
+
+#                     for _ in range(max_iterations):
+
 #                         response = await self._ask_llm(
 #                             llm_client,
 #                             messages,
 #                             openai_tools,
 #                         )
 
-#                         if not response.choices:
-#                             return "I could not generate a response."
+#                         choice = response.choices[0]
+#                         message = choice.message
 
-#                         message = response.choices[0].message
+#                         # ------------------------------------
+#                         # TOOL CALLS
+#                         # ------------------------------------
+
 #                         tool_calls = getattr(
 #                             message,
 #                             "tool_calls",
 #                             None,
 #                         )
 
-#                         if not tool_calls:
-#                             return (
-#                                 message.content
-#                                 or "I could not generate a response."
-#                             )
+#                         if tool_calls:
 
-#                         # Reproduce the assistant tool-call message exactly
-#                         # enough for the next Groq request.
-#                         assistant_message: dict[str, Any] = {
-#                             "role": "assistant",
-#                             "content": message.content or "",
-#                             "tool_calls": [],
-#                         }
+#                             assistant_message = {
+#                                 "role": "assistant",
+#                                 "content": (
+#                                     message.content
+#                                     or ""
+#                                 ),
+#                                 "tool_calls": [],
+#                             }
 
-#                         for tool_call in tool_calls:
-#                             function = tool_call.function
+#                             for tool_call in tool_calls:
 
-#                             assistant_message["tool_calls"].append(
-#                                 {
-#                                     "id": tool_call.id,
-#                                     "type": "function",
-#                                     "function": {
-#                                         "name": function.name,
-#                                         "arguments": (
-#                                             function.arguments or "{}"
-#                                         ),
-#                                     },
-#                                 }
-#                             )
-
-#                         messages.append(assistant_message)
-
-#                         for tool_call in tool_calls:
-#                             total_tool_calls += 1
-
-#                             if total_tool_calls > MAX_TOOL_CALLS:
-#                                 return (
-#                                     "The request required too many tool calls "
-#                                     "and was stopped safely."
+#                                 function = (
+#                                     tool_call.function
 #                                 )
 
-#                             function = tool_call.function
-#                             tool_name = function.name
+#                                 tool_name = (
+#                                     function.name
+#                                 )
 
-#                             try:
-#                                 arguments = self._parse_tool_arguments(
+#                                 raw_arguments = (
 #                                     function.arguments
 #                                 )
 
-#                                 if tool_name not in self.tool_map:
-#                                     raise ValueError(
-#                                         f"Unknown MCP tool requested: {tool_name}"
+#                                 try:
+
+#                                     arguments = json.loads(
+#                                         raw_arguments
+#                                         or "{}"
 #                                     )
 
-#                                 tool_result = await self._call_tool(
-#                                     session,
-#                                     tool_name,
-#                                     arguments,
-#                                 )
+#                                 except Exception:
 
-#                                 llm_content = self._tool_result_for_llm(
-#                                     tool_name,
-#                                     tool_result,
-#                                 )
+#                                     arguments = {}
 
-#                             except Exception as tool_error:
-#                                 self.last_debug = {
-#                                     "status": "error",
-#                                     "tool": tool_name,
-#                                     "arguments": (
-#                                         arguments
-#                                         if "arguments" in locals()
-#                                         else {}
-#                                     ),
-#                                     "result_received": False,
-#                                     "error": str(tool_error),
-#                                 }
-
-#                                 llm_content = json.dumps(
+#                                 assistant_message[
+#                                     "tool_calls"
+#                                 ].append(
 #                                     {
-#                                         "tool": tool_name,
-#                                         "error": str(tool_error),
-#                                     },
-#                                     ensure_ascii=False,
+#                                         "id": tool_call.id,
+#                                         "type": "function",
+#                                         "function": {
+#                                             "name": tool_name,
+#                                             "arguments": (
+#                                                 raw_arguments
+#                                                 or "{}"
+#                                             ),
+#                                         },
+#                                     }
 #                                 )
 
 #                             messages.append(
-#                                 {
-#                                     "role": "tool",
-#                                     "tool_call_id": tool_call.id,
-#                                     "name": tool_name,
-#                                     "content": llm_content,
-#                                 }
+#                                 assistant_message
 #                             )
 
+#                             # Execute each requested MCP tool
+#                             for tool_call in tool_calls:
+
+#                                 function = (
+#                                     tool_call.function
+#                                 )
+
+#                                 tool_name = (
+#                                     function.name
+#                                 )
+
+#                                 try:
+
+#                                     arguments = json.loads(
+#                                         function.arguments
+#                                         or "{}"
+#                                     )
+
+#                                 except Exception:
+
+#                                     arguments = {}
+
+#                                 try:
+
+#                                     tool_result = (
+#                                         await self._call_tool(
+#                                             session,
+#                                             tool_name,
+#                                             arguments,
+#                                         )
+#                                     )
+
+#                                     formatted_result = (
+#                                         self._format_tool_result(
+#                                             tool_name,
+#                                             tool_result,
+#                                         )
+#                                     )
+
+#                                 except Exception as tool_error:
+
+#                                     formatted_result = (
+#                                         "MCP tool error: "
+#                                         + str(tool_error)
+#                                     )
+
+#                                 messages.append(
+#                                     {
+#                                         "role": "tool",
+#                                         "tool_call_id": (
+#                                             tool_call.id
+#                                         ),
+#                                         "content": (
+#                                             formatted_result
+#                                         ),
+#                                     }
+#                                 )
+
+#                             continue
+
+#                         # ------------------------------------
+#                         # NORMAL FINAL ANSWER
+#                         # ------------------------------------
+
+#                         answer = (
+#                             message.content
+#                             or "I could not generate an answer."
+#                         )
+
+#                         return answer
+
 #                     return (
-#                         "I was unable to complete the request within "
-#                         "the allowed tool-call limit."
+#                         "I was unable to complete the request "
+#                         "within the allowed tool-call steps."
 #                     )
 
 #         except Exception as error:
-#             self.last_debug = {
-#                 "status": "connection_error",
-#                 "tool": self.last_tool,
-#                 "arguments": self.last_arguments,
-#                 "result_received": False,
-#                 "error": str(error),
-#             }
 
-#             # Do not expose raw internal stack/error details to end users.
+#             error_text = str(error)
+
 #             return (
-#                 "I could not retrieve the requested PSX data right now. "
-#                 "Please try again."
+#                 "I couldn't connect to the PSX MCP server.\n\n"
+#                 f"Error: {error_text}"
 #             )
 
-#     # ------------------------------------------------------------------
-#     # Public sync API for Streamlit / scripts
-#     # ------------------------------------------------------------------
+#         finally:
+
+#             if http_client is not None:
+
+#                 try:
+#                     await http_client.aclose()
+#                 except Exception:
+#                     pass
+
+#     # ========================================================
+#     # PUBLIC CHAT METHOD
+#     # ========================================================
 
 #     def chat(
 #         self,
 #         user_message: str,
 #         history: list | None = None,
-#     ) -> str:
-#         try:
-#             asyncio.get_running_loop()
-#         except RuntimeError:
-#             return asyncio.run(
-#                 self._chat_async(
-#                     user_message=user_message,
-#                     history=history,
-#                 )
-#             )
+#     ):
 
-#         raise RuntimeError(
-#             "chat() cannot be called from an active event loop. "
-#             "Use: await PSXChatbot()._chat_async(...)"
+#         result = asyncio.run(
+#             self._chat_async(
+#                 user_message=user_message,
+#                 history=history,
+#             )
 #         )
 
+#         self.conversation_history.append(
+#             {
+#                 "role": "user",
+#                 "content": user_message,
+#             }
+#         )
+
+#         self.conversation_history.append(
+#             {
+#                 "role": "assistant",
+#                 "content": result,
+#             }
+#         )
+
+#         return result
+
+
+# # ============================================================
+# # GLOBAL CHATBOT INSTANCE
+# # ============================================================
+
+# _CHATBOT = PSXChatbot()
+
+
+# # ============================================================
+# # STREAMLIT / EXTERNAL ENTRY POINT
+# # ============================================================
 
 # def ask_chatbot(
 #     user_message: str,
 #     history: list | None = None,
-# ) -> dict[str, Any]:
-#     """
-#     Stateless application entry point.
+# ):
 
-#     A fresh PSXChatbot is created per request so mutable MCP/debug
-#     state is not shared between Streamlit users.
-#     """
-#     chatbot = PSXChatbot()
-#     answer = chatbot.chat(
+#     return _CHATBOT.chat(
 #         user_message=user_message,
 #         history=history,
 #     )
-
-#     return {
-#         "answer": answer,
-#         "tool": chatbot.last_tool,
-#         "arguments": chatbot.last_arguments,
-#         "debug": chatbot.last_debug,
-#     }
-
 
 
 from __future__ import annotations
@@ -904,8 +2893,9 @@ import time
 from typing import Any
 
 from dotenv import load_dotenv
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
-from chatbot.mcp_client import mcp_session
 from chatbot.formatters import (
     format_industries,
     format_stock_data,
@@ -918,6 +2908,11 @@ from chatbot.llm import create_llm_client
 load_dotenv()
 
 
+MCP_SERVER_URL = os.getenv(
+    "MCP_SERVER_URL",
+    "http://127.0.0.1:5173/mcp",
+)
+
 LLM_PROVIDER = os.getenv(
     "LLM_PROVIDER",
     "groq",
@@ -928,321 +2923,34 @@ LLM_MODEL = os.getenv(
     "openai/gpt-oss-120b",
 )
 
-MAX_TOOL_ITERATIONS = int(
-    os.getenv("MAX_TOOL_ITERATIONS", "6")
-)
-
-MAX_TOOL_CALLS = int(
-    os.getenv("MAX_TOOL_CALLS", "12")
-)
+MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "6"))
+MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "12"))
 
 
 class PSXChatbot:
-    """
-    PSX chatbot orchestrator for LLM + MCP.
-
-    The chatbot:
-    - discovers MCP tools dynamically
-    - handles simple requests deterministically
-    - supports multi-step tool calling
-    - supports mixed questions
-    - preserves conversation context
-    - resolves industries from live PSX data
-    - verifies stock symbols before answering
-    """
-
-    # ------------------------------------------------------------------
-    # Common words ignored during industry matching
-    # ------------------------------------------------------------------
-
-    _INDUSTRY_STOPWORDS = {
-        "show",
-        "list",
-        "give",
-        "tell",
-        "find",
-        "get",
-        "stocks",
-        "stock",
-        "shares",
-        "share",
-        "sector",
-        "industry",
-        "industries",
-        "what",
-        "which",
-        "where",
-        "how",
-        "current",
-        "price",
-        "prices",
-        "change",
-        "changes",
-        "volume",
-        "highest",
-        "lowest",
-        "top",
-        "bottom",
-        "best",
-        "worst",
-        "please",
-        "me",
-        "the",
-        "for",
-        "in",
-        "of",
-        "by",
-        "and",
-        "or",
-        "on",
-        "to",
-        "from",
-        "with",
-        "now",
-        "then",
-        "also",
-    }
-
-    # ------------------------------------------------------------------
-    # Industry wording aliases
-    # ------------------------------------------------------------------
-
-    _INDUSTRY_ALIASES = {
-        "banking": {"bank"},
-        "banks": {"bank"},
-        "bank": {"bank"},
-        "technology": {"technology"},
-        "tech": {"technology"},
-        "textile": {"textile"},
-        "textiles": {"textile"},
-        "pharma": {"pharmaceutical"},
-        "pharmaceutical": {"pharmaceutical"},
-        "pharmaceuticals": {"pharmaceutical"},
-        "chemical": {"chemical"},
-        "chemicals": {"chemical"},
-        "automobile": {"automobile"},
-        "automobiles": {"automobile"},
-        "auto": {"automobile"},
-        "automotive": {"automobile"},
-        "insurance": {"insurance"},
-        "cement": {"cement"},
-        "fertilizer": {"fertilizer"},
-        "fertilizers": {"fertilizer"},
-        "food": {"food"},
-        "paper": {"paper"},
-        "power": {"power"},
-        "property": {"property"},
-        "real estate": {"real", "estate"},
-        "refinery": {"refinery"},
-        "refineries": {"refinery"},
-        "tobacco": {"tobacco"},
-        "transport": {"transport"},
-        "leather": {"leather"},
-        "jute": {"jute"},
-        "glass": {"glass"},
-        "ceramics": {"ceramic"},
-        "cable": {"cable"},
-        "engineering": {"engineering"},
-        "sugar": {"sugar"},
-        "woollen": {"woollen"},
-        "wool": {"woollen"},
-        "jute": {"jute"},
-        "mutual fund": {"mutual", "fund"},
-        "mutual funds": {"mutual", "fund"},
-    }
-
-    # ------------------------------------------------------------------
-    # Industry keywords that can help route a stock query.
-    #
-    # These are only routing hints.
-    # Final stock/industry data must still come from MCP.
-    # ------------------------------------------------------------------
-
-    _STOCK_NAME_INDUSTRY_HINTS = {
-        "bank": {"bank"},
-        "insurance": {"insurance"},
-        "cement": {"cement"},
-        "fertilizer": {"fertilizer"},
-        "chemical": {"chemical"},
-        "pharmaceutical": {"pharmaceutical"},
-        "pharma": {"pharmaceutical"},
-        "textile": {"textile"},
-        "spinning": {"spinning"},
-        "weaving": {"weaving"},
-        "composite": {"composite"},
-        "power": {"power"},
-        "energy": {"oil", "gas"},
-        "oil": {"oil"},
-        "petroleum": {"oil"},
-        "refinery": {"refinery"},
-        "tobacco": {"tobacco"},
-        "sugar": {"sugar"},
-        "jute": {"jute"},
-        "leather": {"leather"},
-        "engineering": {"engineering"},
-        "glass": {"glass"},
-        "ceramic": {"ceramic"},
-        "paper": {"paper"},
-        "packaging": {"packaging"},
-        "automobile": {"automobile"},
-        "motor": {"automobile"},
-        "transport": {"transport"},
-        "technology": {"technology"},
-        "communication": {"communication"},
-        "real estate": {"real", "estate"},
-        "property": {"property"},
-    }
-
-    # ------------------------------------------------------------------
-    # Init
-    # ------------------------------------------------------------------
-
     def __init__(self) -> None:
         self.tools: list[Any] = []
         self.tool_map: dict[str, Any] = {}
 
         self.last_tool: str | None = None
-        self.last_arguments: dict[str, Any] = {}
-        self.last_debug: dict[str, Any] | None = None
+        self.last_arguments: dict[str, Any] | None = None
+        self.last_debug: list[dict[str, Any]] = []
 
-        self.requested_symbols: set[str] = set()
+    # ---------------------------------------------------------
+    # TEXT HELPERS
+    # ---------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Text helpers
-    # ------------------------------------------------------------------
+    def _normalize_text(self, text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip().lower())
 
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        text = str(text).lower().strip()
-        return re.sub(r"\s+", " ", text)
-
-    @staticmethod
-    def _tokens(text: str) -> list[str]:
-        return re.findall(
-            r"[a-z0-9]+",
-            text.lower(),
-        )
-
-    @classmethod
-    def _meaningful_tokens(
-        cls,
-        text: str,
-    ) -> set[str]:
-        return {
-            token
-            for token in cls._tokens(text)
-            if len(token) >= 3
-            and token not in cls._INDUSTRY_STOPWORDS
-        }
-
-    # ------------------------------------------------------------------
-    # Detect whether a query is mixed / multi-intent
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _is_mixed_request(
-        cls,
-        question: str,
-    ) -> bool:
-        q = cls._normalize_text(question)
-
-        ranking_change = any(
-            phrase in q
-            for phrase in (
-                "top change",
-                "top 10 change",
-                "highest change",
-                "top gainer",
-                "top gainers",
-                "bottom change",
-                "bottom 10 change",
-                "lowest change",
-                "loser",
-                "losers",
-            )
-        )
-
-        ranking_volume = any(
-            phrase in q
-            for phrase in (
-                "top volume",
-                "highest volume",
-                "most volume",
-                "bottom volume",
-                "lowest volume",
-                "least volume",
-            )
-        )
-
-        stock_specific = any(
-            phrase in q
-            for phrase in (
-                "stock price",
-                "share price",
-                "current price",
-                "market price",
-                "stock quote",
-                "share quote",
-                "trading at",
-                "how is",
-                "performing",
-            )
-        )
-
-        stock_listing = any(
-            phrase in q
-            for phrase in (
-                "show stocks",
-                "list stocks",
-                "stocks in",
-                "shares in",
-                "show shares",
-            )
-        )
-
-        intent_count = sum(
-            [
-                ranking_change,
-                ranking_volume,
-                stock_specific,
-                stock_listing,
-            ]
-        )
-
-        connectors = any(
-            connector in q
-            for connector in (
-                " and ",
-                " also ",
-                " then ",
-                " plus ",
-                " as well as ",
-                ",",
-            )
-        )
-
-        if intent_count >= 2:
-            return True
-
-        if connectors and intent_count >= 1:
-            return True
-
-        return False
-
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------
     # MCP
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------
 
-    async def _load_tools(
-        self,
-        session: Any,
-    ) -> list[Any]:
-        response = await session.list_tools()
+    async def _load_tools(self, session: ClientSession) -> list[Any]:
+        result = await session.list_tools()
 
-        self.tools = list(
-            response.tools or []
-        )
-
+        self.tools = list(result.tools or [])
         self.tool_map = {
             tool.name: tool
             for tool in self.tools
@@ -1252,91 +2960,257 @@ class PSXChatbot:
 
     async def _call_tool(
         self,
-        session: Any,
+        session: ClientSession,
         tool_name: str,
-        arguments: dict[str, Any] | None = None,
+        arguments: dict[str, Any],
     ) -> Any:
-        arguments = arguments or {}
 
         if tool_name not in self.tool_map:
             raise ValueError(
-                f"Unknown MCP tool: {tool_name}"
+                f"MCP tool '{tool_name}' is not available."
             )
-
-        started = time.perf_counter()
 
         self.last_tool = tool_name
         self.last_arguments = arguments
 
-        try:
-            result = await session.call_tool(
-                tool_name,
-                arguments=arguments,
-            )
+        started = time.time()
 
-            self.last_debug = {
-                "status": "success",
-                "tool": tool_name,
-                "arguments": arguments,
-                "duration_ms": round(
-                    (
-                        time.perf_counter()
-                        - started
-                    )
-                    * 1000,
-                    2,
-                ),
-                "result_received": True,
-            }
-
-            return result
-
-        except Exception as exc:
-            self.last_debug = {
-                "status": "error",
-                "tool": tool_name,
-                "arguments": arguments,
-                "duration_ms": round(
-                    (
-                        time.perf_counter()
-                        - started
-                    )
-                    * 1000,
-                    2,
-                ),
-                "result_received": False,
-                "error": str(exc),
-            }
-
-            raise
-
-    # ------------------------------------------------------------------
-    # Extract MCP result
-    # ------------------------------------------------------------------
-
-    def _extract_tool_result(
-        self,
-        result: Any,
-    ) -> Any:
-        if result is None:
-            return None
-
-        structured = getattr(
-            result,
-            "structuredContent",
-            None,
+        result = await session.call_tool(
+            tool_name,
+            arguments,
         )
 
-        if structured is None:
-            structured = getattr(
-                result,
-                "structured_content",
+        elapsed = round(time.time() - started, 3)
+
+        self.last_debug.append(
+            {
+                "tool": tool_name,
+                "arguments": arguments,
+                "elapsed_seconds": elapsed,
+                "success": True,
+            }
+        )
+
+        return result
+
+    # ---------------------------------------------------------
+    # OPTIONAL INDUSTRY DETECTION HELPERS
+    #
+    # These are kept from the existing architecture.
+    # They are NOT used for routing anymore.
+    # The LLM now decides which MCP tool to call.
+    # ---------------------------------------------------------
+
+    async def _find_industry_in_question(
+        self,
+        session: ClientSession,
+        question: str,
+    ) -> str | None:
+
+        try:
+            result = await self._call_tool(
+                session,
+                "get_industries",
+                {},
+            )
+
+            data = self._extract_tool_result(result)
+
+            if not isinstance(data, list):
+                return None
+
+            industries: list[str] = []
+
+            for item in data:
+                if isinstance(item, str):
+                    industries.append(item)
+
+                elif isinstance(item, dict):
+                    for key in ("industry", "name", "sector"):
+                        value = item.get(key)
+
+                        if value:
+                            industries.append(str(value))
+                            break
+
+            if not industries:
+                return None
+
+            normalized_question = self._normalize_text(question)
+
+            # Exact match
+            for industry in industries:
+                normalized_industry = self._normalize_text(industry)
+
+                if normalized_industry in normalized_question:
+                    return industry
+
+            # Fuzzy match
+            words = normalized_question.split()
+
+            for industry in industries:
+                normalized_industry = self._normalize_text(industry)
+
+                score = difflib.SequenceMatcher(
+                    None,
+                    normalized_industry,
+                    normalized_question,
+                ).ratio()
+
+                if score >= 0.80:
+                    return industry
+
+                for word in words:
+                    if len(word) >= 4:
+                        word_score = difflib.SequenceMatcher(
+                            None,
+                            normalized_industry,
+                            word,
+                        ).ratio()
+
+                        if word_score >= 0.90:
+                            return industry
+
+        except Exception:
+            return None
+
+        return None
+
+    # ---------------------------------------------------------
+    # OLD DIRECT ROUTER
+    #
+    # Kept for compatibility with the existing file, but it is
+    # NO LONGER called from _chat_async().
+    #
+    # The LLM is now responsible for selecting MCP tools.
+    # ---------------------------------------------------------
+
+    async def _detect_direct_tool(
+        self,
+        session: ClientSession,
+        question: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+
+        q = self._normalize_text(question)
+
+        industry = await self._find_industry_in_question(
+            session,
+            question,
+        )
+
+        if (
+            "top" in q
+            and "change" in q
+        ):
+            arguments = {}
+
+            if industry:
+                arguments["industry"] = industry
+
+            return "get_top_change", arguments
+
+        if (
+            "bottom" in q
+            and "change" in q
+        ):
+            arguments = {}
+
+            if industry:
+                arguments["industry"] = industry
+
+            return "get_bottom_change", arguments
+
+        if (
+            "top" in q
+            and "volume" in q
+        ):
+            arguments = {}
+
+            if industry:
+                arguments["industry"] = industry
+
+            return "get_top_volume", arguments
+
+        if (
+            "bottom" in q
+            and "volume" in q
+        ):
+            arguments = {}
+
+            if industry:
+                arguments["industry"] = industry
+
+            return "get_bottom_volume", arguments
+
+        if "industry" in q or "industries" in q:
+            return "get_industries", {}
+
+        if "symbol" in q or "symbols" in q:
+            return "get_symbols", {}
+
+        if "stock" in q:
+            arguments = {}
+
+            if industry:
+                arguments["industry"] = industry
+
+            return "get_stocks", arguments
+
+        return None
+
+    # ---------------------------------------------------------
+    # OPENAI / GROQ TOOL SCHEMA
+    # ---------------------------------------------------------
+
+    def _openai_tools(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+
+        for tool in self.tools:
+            schema = getattr(
+                tool,
+                "inputSchema",
                 None,
             )
 
-        if structured is not None:
-            return structured
+            if schema is None:
+                schema = getattr(
+                    tool,
+                    "input_schema",
+                    None,
+                )
 
+            if schema is None:
+                schema = {
+                    "type": "object",
+                    "properties": {},
+                }
+
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": (
+                            getattr(tool, "description", None)
+                            or f"MCP tool: {tool.name}"
+                        ),
+                        "parameters": schema,
+                    },
+                }
+            )
+
+        return tools
+
+    # ---------------------------------------------------------
+    # MCP RESULT EXTRACTION
+    # ---------------------------------------------------------
+
+    def _extract_tool_result(self, result: Any) -> Any:
+
+        if result is None:
+            return None
+
+        # MCP CallToolResult usually has .content
         content = getattr(
             result,
             "content",
@@ -1349,6 +3223,7 @@ class PSXChatbot:
         extracted: list[Any] = []
 
         for item in content:
+
             text_value = getattr(
                 item,
                 "text",
@@ -1356,1093 +3231,45 @@ class PSXChatbot:
             )
 
             if text_value is not None:
-                extracted.append(
-                    text_value
-                )
-            else:
-                extracted.append(
-                    item
-                )
+                try:
+                    extracted.append(
+                        json.loads(text_value)
+                    )
+                except Exception:
+                    extracted.append(text_value)
+
+                continue
+
+            extracted.append(item)
 
         if len(extracted) == 1:
-            value = extracted[0]
-
-            if isinstance(value, str):
-                try:
-                    return json.loads(
-                        value
-                    )
-                except (
-                    json.JSONDecodeError,
-                    TypeError,
-                ):
-                    return value
-
-            return value
+            return extracted[0]
 
         return extracted
 
-    # ------------------------------------------------------------------
-    # Generic list extraction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_data_list(
-        data: Any,
-    ) -> list[Any]:
-        if isinstance(data, list):
-            return data
-
-        if not isinstance(data, dict):
-            return []
-
-        for key in (
-            "data",
-            "results",
-            "industries",
-            "symbols",
-            "stocks",
-        ):
-            value = data.get(key)
-
-            if isinstance(value, list):
-                return value
-
-        return []
-
-    # ------------------------------------------------------------------
-    # Extract industry names from live MCP result
-    # ------------------------------------------------------------------
-
-    def _extract_industries(
-        self,
-        data: Any,
-    ) -> list[str]:
-        items = self._extract_data_list(
-            data
-        )
-
-        industries: list[str] = []
-
-        for item in items:
-            if isinstance(item, dict):
-                name = (
-                    item.get("industry")
-                    or item.get("name")
-                    or item.get("sector")
-                    or item.get("sector_name")
-                )
-            else:
-                name = str(item)
-
-            if name:
-                industries.append(
-                    str(name).strip()
-                )
-
-        return list(
-            dict.fromkeys(industries)
-        )
-
-    # ------------------------------------------------------------------
-    # Resolve industry using live MCP catalog
+    # ---------------------------------------------------------
+    # FORMATTER
     #
-    # Returns:
-    #   (exact_match, ambiguous_matches)
-    # ------------------------------------------------------------------
-
-    async def _resolve_industry_hint(
-        self,
-        session: Any,
-        text: str,
-    ) -> tuple[str | None, list[str]]:
-        try:
-            result = await self._call_tool(
-                session,
-                "get_industries",
-                {},
-            )
-
-            data = self._extract_tool_result(
-                result
-            )
-
-            industry_names = (
-                self._extract_industries(
-                    data
-                )
-            )
-
-            candidates = [
-                (
-                    self._normalize_text(name),
-                    name,
-                )
-                for name in industry_names
-            ]
-
-            q = self._normalize_text(
-                text
-            )
-
-            # ----------------------------------------------------------
-            # Exact phrase match
-            # ----------------------------------------------------------
-
-            exact = [
-                original
-                for normalized, original
-                in candidates
-                if normalized
-                and normalized in q
-            ]
-
-            if len(exact) == 1:
-                return exact[0], []
-
-            if len(exact) > 1:
-                return None, exact
-
-            # ----------------------------------------------------------
-            # Alias matching
-            # ----------------------------------------------------------
-
-            alias_matches: list[str] = []
-
-            for alias, required_tokens in (
-                self._INDUSTRY_ALIASES.items()
-            ):
-                if alias not in q:
-                    continue
-
-                for normalized, original in candidates:
-                    candidate_tokens = set(
-                        self._tokens(
-                            normalized
-                        )
-                    )
-
-                    if required_tokens.issubset(
-                        candidate_tokens
-                    ):
-                        alias_matches.append(
-                            original
-                        )
-
-            alias_matches = list(
-                dict.fromkeys(
-                    alias_matches
-                )
-            )
-
-            if len(alias_matches) == 1:
-                return alias_matches[0], []
-
-            if len(alias_matches) > 1:
-                return None, alias_matches
-
-            # ----------------------------------------------------------
-            # Token overlap
-            # ----------------------------------------------------------
-
-            question_tokens = (
-                self._meaningful_tokens(
-                    q
-                )
-            )
-
-            scored: list[
-                tuple[float, str]
-            ] = []
-
-            for normalized, original in (
-                candidates
-            ):
-                industry_tokens = {
-                    token
-                    for token in self._tokens(
-                        normalized
-                    )
-                    if token not in {
-                        "and",
-                        "the",
-                        "of",
-                    }
-                }
-
-                overlap = (
-                    question_tokens
-                    & industry_tokens
-                )
-
-                if not overlap:
-                    continue
-
-                score = (
-                    len(overlap)
-                    / max(
-                        len(industry_tokens),
-                        1,
-                    )
-                )
-
-                scored.append(
-                    (
-                        score,
-                        original,
-                    )
-                )
-
-            scored.sort(
-                key=lambda item: item[0],
-                reverse=True,
-            )
-
-            if scored:
-                best_score = scored[0][0]
-
-                strong = [
-                    name
-                    for score, name
-                    in scored
-                    if score >= 0.5
-                    and score >= (
-                        best_score - 0.10
-                    )
-                ]
-
-                strong = list(
-                    dict.fromkeys(
-                        strong
-                    )
-                )
-
-                if len(strong) == 1:
-                    return strong[0], []
-
-                if len(strong) > 1:
-                    return None, strong
-
-            # ----------------------------------------------------------
-            # Fuzzy fallback
-            # ----------------------------------------------------------
-
-            question_words = [
-                token
-                for token in question_tokens
-                if len(token) >= 4
-            ]
-
-            fuzzy_matches: list[str] = []
-
-            for normalized, original in (
-                candidates
-            ):
-                industry_tokens = [
-                    token
-                    for token in self._tokens(
-                        normalized
-                    )
-                    if len(token) >= 4
-                ]
-
-                for industry_token in (
-                    industry_tokens
-                ):
-                    for word in (
-                        question_words
-                    ):
-                        ratio = (
-                            difflib.SequenceMatcher(
-                                None,
-                                industry_token,
-                                word,
-                            ).ratio()
-                        )
-
-                        if ratio >= 0.86:
-                            fuzzy_matches.append(
-                                original
-                            )
-                            break
-
-            fuzzy_matches = list(
-                dict.fromkeys(
-                    fuzzy_matches
-                )
-            )
-
-            if len(fuzzy_matches) == 1:
-                return fuzzy_matches[0], []
-
-            if len(fuzzy_matches) > 1:
-                return None, fuzzy_matches
-
-        except Exception:
-            return None, []
-
-        return None, []
-
-    async def _find_industry_in_question(
-        self,
-        session: Any,
-        question: str,
-    ) -> str | None:
-        industry, ambiguous = (
-            await self._resolve_industry_hint(
-                session,
-                question,
-            )
-        )
-
-        if ambiguous:
-            return None
-
-        return industry
-
-    # ------------------------------------------------------------------
-    # Recent user context
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _recent_user_context(
-        history: list | None,
-    ) -> str:
-        if not history:
-            return ""
-
-        recent: list[str] = []
-
-        for item in reversed(
-            history
-        ):
-            if not isinstance(
-                item,
-                dict,
-            ):
-                continue
-
-            if (
-                item.get("role")
-                != "user"
-            ):
-                continue
-
-            content = item.get(
-                "content"
-            )
-
-            if content:
-                recent.append(
-                    str(content)
-                )
-
-            if len(recent) >= 3:
-                break
-
-        return " ".join(
-            reversed(recent)
-        )
-
-    # ------------------------------------------------------------------
-    # Deterministic direct routing
-    #
-    # Used only for simple one-intent requests.
-    # Mixed/stock-specific questions go through LLM tool calling.
-    # ------------------------------------------------------------------
-
-    async def _detect_direct_tool(
-        self,
-        session: Any,
-        question: str,
-        history: list | None = None,
-    ) -> tuple[
-        str | None,
-        dict[str, Any],
-    ]:
-        q = self._normalize_text(
-            question
-        )
-
-        # Never use deterministic shortcut
-        # for mixed questions.
-        if self._is_mixed_request(
-            question
-        ):
-            return None, {}
-
-        # --------------------------------------------------------------
-        # Symbols
-        # --------------------------------------------------------------
-
-        if (
-            "list symbols" in q
-            or "all symbols" in q
-            or "stock symbols" in q
-            or q in {
-                "symbols",
-                "symbol",
-            }
-        ):
-            return "get_symbols", {}
-
-        # --------------------------------------------------------------
-        # Industries
-        # --------------------------------------------------------------
-
-        if (
-            "list industries" in q
-            or "all industries" in q
-            or q in {
-                "industries",
-                "industry",
-            }
-        ):
-            return "get_industries", {}
-
-        # --------------------------------------------------------------
-        # Stock-specific queries should use the LLM route because
-        # they may require:
-        #
-        # symbol → industry → get_stocks → row lookup
-        # --------------------------------------------------------------
-
-        stock_specific = any(
-            phrase in q
-            for phrase in (
-                "stock price",
-                "share price",
-                "current price",
-                "market price",
-                "stock quote",
-                "share quote",
-                "trading at",
-                "how is",
-                "performing",
-                "tell me about",
-            )
-        )
-
-        if stock_specific:
-            return None, {}
-
-        # --------------------------------------------------------------
-        # Resolve industry from current question.
-        # If absent, use recent user context for follow-up queries.
-        # --------------------------------------------------------------
-
-        industry = None
-        ambiguous: list[str] = []
-
-        industry_signal = any(
-            token in q
-            for token in (
-                "bank",
-                "banking",
-                "banks",
-                "textile",
-                "technology",
-                "tech",
-                "pharma",
-                "pharmaceutical",
-                "chemical",
-                "chemicals",
-                "cement",
-                "fertilizer",
-                "insurance",
-                "automobile",
-                "automotive",
-                "oil",
-                "gas",
-                "paper",
-                "power",
-                "property",
-                "real estate",
-                "transport",
-                "engineering",
-                "sugar",
-                "tobacco",
-                "leather",
-                "jute",
-                "glass",
-                "ceramic",
-                "refinery",
-                "wool",
-                "sector",
-                "industry",
-            )
-        )
-
-        if industry_signal:
-            industry, ambiguous = (
-                await self._resolve_industry_hint(
-                    session,
-                    question,
-                )
-            )
-
-        if (
-            industry is None
-            and not ambiguous
-        ):
-            recent_context = (
-                self._recent_user_context(
-                    history
-                )
-            )
-
-            if recent_context:
-                industry, ambiguous = (
-                    await self._resolve_industry_hint(
-                        session,
-                        recent_context,
-                    )
-                )
-
-        # --------------------------------------------------------------
-        # Ambiguous industry:
-        # do not guess.
-        # Let LLM route produce a clarification.
-        # --------------------------------------------------------------
-
-        if ambiguous:
-            return None, {}
-
-        # --------------------------------------------------------------
-        # Simple "show X stocks"
-        # --------------------------------------------------------------
-
-        stock_listing = any(
-            phrase in q
-            for phrase in (
-                "show stocks",
-                "show shares",
-                "list stocks",
-                "list shares",
-                "stocks in",
-                "shares in",
-            )
-        )
-
-        if stock_listing:
-            if industry:
-                return (
-                    "get_stocks",
-                    {
-                        "industry": industry
-                    },
-                )
-
-            return None, {}
-
-        # --------------------------------------------------------------
-        # Top change
-        # --------------------------------------------------------------
-
-        if any(
-            phrase in q
-            for phrase in (
-                "top change",
-                "top 10 change",
-                "highest change",
-                "top gainers",
-                "top gainer",
-            )
-        ):
-            return (
-                "get_top_change",
-                (
-                    {
-                        "industry": industry
-                    }
-                    if industry
-                    else {}
-                ),
-            )
-
-        # --------------------------------------------------------------
-        # Bottom change
-        # --------------------------------------------------------------
-
-        if any(
-            phrase in q
-            for phrase in (
-                "bottom change",
-                "bottom 10 change",
-                "lowest change",
-                "top losers",
-                "losers",
-            )
-        ):
-            return (
-                "get_bottom_change",
-                (
-                    {
-                        "industry": industry
-                    }
-                    if industry
-                    else {}
-                ),
-            )
-
-        # --------------------------------------------------------------
-        # Top volume
-        # --------------------------------------------------------------
-
-        if any(
-            phrase in q
-            for phrase in (
-                "top volume",
-                "highest volume",
-                "most volume",
-            )
-        ):
-            return (
-                "get_top_volume",
-                (
-                    {
-                        "industry": industry
-                    }
-                    if industry
-                    else {}
-                ),
-            )
-
-        # --------------------------------------------------------------
-        # Bottom volume
-        # --------------------------------------------------------------
-
-        if any(
-            phrase in q
-            for phrase in (
-                "bottom volume",
-                "lowest volume",
-                "least volume",
-            )
-        ):
-            return (
-                "get_bottom_volume",
-                (
-                    {
-                        "industry": industry
-                    }
-                    if industry
-                    else {}
-                ),
-            )
-
-        return None, {}
-
-    # ------------------------------------------------------------------
-    # Stock symbol extraction
-    # ------------------------------------------------------------------
-
-    def _extract_symbol_records(
-        self,
-        data: Any,
-    ) -> list[dict[str, Any]]:
-        items = self._extract_data_list(
-            data
-        )
-
-        records: list[
-            dict[str, Any]
-        ] = []
-
-        for item in items:
-            if isinstance(item, dict):
-                records.append(item)
-            else:
-                records.append(
-                    {
-                        "symbol": str(
-                            item
-                        )
-                    }
-                )
-
-        return records
-
-    async def _find_requested_symbols(
-        self,
-        session: Any,
-        question: str,
-        history: list | None = None,
-    ) -> tuple[
-        list[str],
-        list[str],
-        str | None,
-    ]:
-        """
-        Verify possible stock symbols against live get_symbols() data.
-
-        Returns:
-            matched_symbols
-            matched_names
-            routing_hint
-        """
-
-        combined = (
-            question
-            + " "
-            + self._recent_user_context(
-                history
-            )
-        )
-
-        q_lower = self._normalize_text(
-            combined
-        )
-
-        # Avoid unnecessary get_symbols call
-        # for unrelated requests.
-        stock_signal = any(
-            phrase in q_lower
-            for phrase in (
-                "stock price",
-                "share price",
-                "current price",
-                "market price",
-                "stock quote",
-                "share quote",
-                "trading at",
-                "stock",
-                "stocks",
-                "share",
-                "shares",
-                "performing",
-                "volume",
-            )
-        )
-
-        uppercase_symbols = re.findall(
-            r"\b[A-Z]{2,6}\b",
-            combined,
-        )
-
-        stock_signal = (
-            stock_signal
-            or bool(
-                uppercase_symbols
-            )
-        )
-
-        if not stock_signal:
-            return [], [], None
-
-        try:
-            result = await self._call_tool(
-                session,
-                "get_symbols",
-                {},
-            )
-
-            data = self._extract_tool_result(
-                result
-            )
-
-            records = (
-                self._extract_symbol_records(
-                    data
-                )
-            )
-
-            normalized_q = (
-                self._normalize_text(
-                    combined
-                )
-            )
-
-            matched_symbols: list[str] = []
-            matched_names: list[str] = []
-
-            for record in records:
-                symbol = str(
-                    record.get(
-                        "symbol"
-                    )
-                    or ""
-                ).strip().upper()
-
-                if not symbol:
-                    continue
-
-                name = str(
-                    record.get(
-                        "name"
-                    )
-                    or ""
-                ).strip()
-
-                # ------------------------------------------------------
-                # Exact symbol match
-                # ------------------------------------------------------
-
-                if re.search(
-                    rf"\b{re.escape(symbol.lower())}\b",
-                    normalized_q,
-                ):
-                    matched_symbols.append(
-                        symbol
-                    )
-
-                    if name:
-                        matched_names.append(
-                            name
-                        )
-
-                    continue
-
-                # ------------------------------------------------------
-                # Company-name match when available
-                # ------------------------------------------------------
-
-                if name:
-                    normalized_name = (
-                        self._normalize_text(
-                            name
-                        )
-                    )
-
-                    important_name_tokens = [
-                        token
-                        for token in self._tokens(
-                            normalized_name
-                        )
-                        if token
-                        not in {
-                            "limited",
-                            "ltd",
-                            "plc",
-                            "company",
-                            "the",
-                        }
-                    ]
-
-                    if (
-                        len(
-                            important_name_tokens
-                        )
-                        >= 1
-                    ):
-                        name_hits = sum(
-                            1
-                            for token in important_name_tokens
-                            if token in normalized_q
-                        )
-
-                        required = (
-                            1
-                            if len(
-                                important_name_tokens
-                            )
-                            == 1
-                            else 2
-                        )
-
-                        if (
-                            name_hits
-                            >= min(
-                                required,
-                                len(
-                                    important_name_tokens
-                                ),
-                            )
-                        ):
-                            matched_symbols.append(
-                                symbol
-                            )
-                            matched_names.append(
-                                name
-                            )
-
-            matched_symbols = list(
-                dict.fromkeys(
-                    matched_symbols
-                )
-            )
-
-            matched_names = list(
-                dict.fromkeys(
-                    matched_names
-                )
-            )
-
-            self.requested_symbols = set(
-                matched_symbols
-            )
-
-            # ----------------------------------------------------------
-            # Routing hint from symbol metadata if available.
-            #
-            # This is only a query-routing hint.
-            # The final stock row must still verify it.
-            # ----------------------------------------------------------
-
-            routing_hint: str | None = None
-
-            live_industry_candidates: list[
-                str
-            ] = []
-
-            for record in records:
-                symbol = str(
-                    record.get(
-                        "symbol"
-                    )
-                    or ""
-                ).strip().upper()
-
-                if symbol not in matched_symbols:
-                    continue
-
-                sector = (
-                    record.get(
-                        "sector_name"
-                    )
-                    or record.get(
-                        "industry"
-                    )
-                    or record.get(
-                        "sector"
-                    )
-                )
-
-                if sector:
-                    live_industry_candidates.append(
-                        str(sector).strip()
-                    )
-
-                name = str(
-                    record.get(
-                        "name"
-                    )
-                    or ""
-                ).strip()
-
-                if name:
-                    name_lower = (
-                        self._normalize_text(
-                            name
-                        )
-                    )
-
-                    for keyword, token_set in (
-                        self._STOCK_NAME_INDUSTRY_HINTS.items()
-                    ):
-                        if keyword not in name_lower:
-                            continue
-
-                        # We only return a textual hint here.
-                        # The LLM must verify using MCP tool output.
-                        routing_hint = (
-                            " ".join(
-                                sorted(
-                                    token_set
-                                )
-                            )
-                        )
-
-                        break
-
-            if live_industry_candidates:
-                routing_hint = (
-                    live_industry_candidates[0]
-                )
-
-            return (
-                matched_symbols,
-                matched_names,
-                routing_hint,
-            )
-
-        except Exception:
-            self.requested_symbols = set()
-
-            return [], [], None
-
-    # ------------------------------------------------------------------
-    # Tool schema conversion
-    # ------------------------------------------------------------------
-
-    def _openai_tools(
-        self,
-    ) -> list[dict[str, Any]]:
-        openai_tools: list[
-            dict[str, Any]
-        ] = []
-
-        for tool in self.tools:
-            input_schema = getattr(
-                tool,
-                "inputSchema",
-                None,
-            )
-
-            if input_schema is None:
-                input_schema = getattr(
-                    tool,
-                    "input_schema",
-                    None,
-                )
-
-            if not input_schema:
-                input_schema = {
-                    "type": "object",
-                    "properties": {},
-                }
-
-            openai_tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": (
-                            getattr(
-                                tool,
-                                "description",
-                                None,
-                            )
-                            or (
-                                f"PSX MCP tool: "
-                                f"{tool.name}"
-                            )
-                        ),
-                        "parameters": input_schema,
-                    },
-                }
-            )
-
-        return openai_tools
-
-    # ------------------------------------------------------------------
-    # User-facing formatting
-    # ------------------------------------------------------------------
+    # Kept for existing compatibility / UI use.
+    # It is NOT used as the final answer in the normal LLM flow.
+    # ---------------------------------------------------------
 
     def _format_tool_result(
         self,
         tool_name: str,
-        result: Any,
+        data: Any,
     ) -> str:
-        data = self._extract_tool_result(
-            result
-        )
 
         try:
+
             if tool_name == "get_symbols":
-                return format_symbols(
-                    data
-                )
+                return format_symbols(data)
 
             if tool_name == "get_industries":
-                return format_industries(
-                    data
-                )
+                return format_industries(data)
 
             if tool_name == "get_stocks":
-                return format_stock_data(
-                    data
-                )
+                return format_stock_data(data)
 
             if tool_name in {
                 "get_top_change",
@@ -2464,884 +3291,521 @@ class PSXChatbot:
         try:
             return json.dumps(
                 data,
+                indent=2,
                 ensure_ascii=False,
                 default=str,
             )
-        except (
-            TypeError,
-            ValueError,
-        ):
+        except Exception:
             return str(data)
 
-    # ------------------------------------------------------------------
-    # Compact result for LLM
-    #
-    # Important:
-    # The user-facing formatter is separate.
-    # The LLM does NOT need every PSX field.
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------
+    # MCP RESULT → LLM
+    # ---------------------------------------------------------
 
     def _tool_result_for_llm(
         self,
         tool_name: str,
-        result: Any,
+        data: Any,
     ) -> str:
-        data = self._extract_tool_result(
-            result
-        )
 
-        if isinstance(
-            data,
-            str,
-        ):
-            return data
+        payload = {
+            "tool": tool_name,
+            "data": data,
+        }
 
-        if tool_name == "get_industries":
-            names = self._extract_industries(
-                data
-            )
-
-            return json.dumps(
-                {
-                    "tool": tool_name,
-                    "count": len(names),
-                    "industries": names,
-                },
-                ensure_ascii=False,
-            )
-
-        if tool_name == "get_symbols":
-            records = (
-                self._extract_symbol_records(
-                    data
-                )
-            )
-
-            if self.requested_symbols:
-                records = [
-                    record
-                    for record in records
-                    if str(
-                        record.get(
-                            "symbol"
-                        )
-                        or ""
-                    ).upper()
-                    in self.requested_symbols
-                ]
-
-            compact_symbols = []
-
-            for record in records:
-                compact_symbols.append(
-                    {
-                        "symbol": record.get(
-                            "symbol"
-                        ),
-                        "name": record.get(
-                            "name"
-                        ),
-                    }
-                )
-
-            return json.dumps(
-                {
-                    "tool": tool_name,
-                    "count": (
-                        data.get(
-                            "count"
-                        )
-                        if isinstance(
-                            data,
-                            dict,
-                        )
-                        else len(compact_symbols)
-                    ),
-                    "matches": compact_symbols,
-                },
-                ensure_ascii=False,
-                default=str,
-            )
-
-        # --------------------------------------------------------------
-        # Extract stock/ranking rows
-        # --------------------------------------------------------------
-
-        rows = self._extract_data_list(
-            data
-        )
-
-        if rows:
-            compact_rows: list[
-                dict[str, Any]
-            ] = []
-
-            for row in rows:
-                if not isinstance(
-                    row,
-                    dict,
-                ):
-                    continue
-
-                compact = {
-                    "symbol": row.get(
-                        "symbol"
-                    ),
-                    "name": row.get(
-                        "name"
-                    ),
-                    "current_price": row.get(
-                        "current_price"
-                    ),
-                    "ldcp": row.get(
-                        "ldcp"
-                    ),
-                    "change_value": row.get(
-                        "change_value"
-                    ),
-                    "change_percent": row.get(
-                        "change_percent"
-                    ),
-                    "volume": row.get(
-                        "volume"
-                    ),
-                    "sector_name": row.get(
-                        "sector_name"
-                    ),
-                }
-
-                # ------------------------------------------------------
-                # For individual-stock lookups,
-                # only send matching rows to the LLM.
-                # ------------------------------------------------------
-
-                if (
-                    tool_name == "get_stocks"
-                    and self.requested_symbols
-                ):
-                    symbol = str(
-                        compact.get(
-                            "symbol"
-                        )
-                        or ""
-                    ).upper()
-
-                    if symbol not in (
-                        self.requested_symbols
-                    ):
-                        continue
-
-                compact_rows.append(
-                    compact
-                )
-
-            payload: dict[
-                str,
-                Any,
-            ] = {
-                "tool": tool_name,
-                "count": len(rows),
-            }
-
-            if (
-                tool_name == "get_stocks"
-                and self.requested_symbols
-            ):
-                payload[
-                    "requested_symbols"
-                ] = sorted(
-                    self.requested_symbols
-                )
-
-                payload[
-                    "matches"
-                ] = compact_rows
-
-                payload[
-                    "match_count"
-                ] = len(
-                    compact_rows
-                )
-            else:
-                payload[
-                    "data"
-                ] = compact_rows
-
+        try:
             return json.dumps(
                 payload,
                 ensure_ascii=False,
                 default=str,
             )
+        except Exception:
+            return str(payload)
 
-        # --------------------------------------------------------------
-        # Fallback for arbitrary structured data
-        # --------------------------------------------------------------
+    # ---------------------------------------------------------
+    # SYSTEM PROMPT
+    # ---------------------------------------------------------
 
-        try:
-            return json.dumps(
-                {
-                    "tool": tool_name,
-                    "data": data,
-                },
-                ensure_ascii=False,
-                default=str,
-            )
-        except (
-            TypeError,
-            ValueError,
-        ):
-            return str(data)
+    def _system_prompt(self) -> str:
 
-    # ------------------------------------------------------------------
-    # Dynamic prompt
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _system_prompt() -> str:
         return """
-You are a Pakistan Stock Exchange (PSX) data chatbot connected to live PSX data through MCP tools.
+You are a professional Pakistan Stock Exchange (PSX) data chatbot.
 
-Rules:
+Your job is to answer user questions using the available MCP tools.
 
-1. Use MCP tools for every PSX fact. Never invent current prices, changes, volumes, industries, symbols, or company data.
-2. MCP tool results are the source of truth.
-3. Answer every part of a mixed question. Do not stop after completing only one clause.
-4. You may call multiple MCP tools and continue for multiple rounds when needed.
-5. For a specific stock:
-   - verify the symbol against MCP data when possible;
-   - retrieve the stock row through get_stocks;
-   - use the exact returned current_price, change_percent, change_value, volume, and other returned fields;
-   - do not say that a direct stock-price tool is missing merely because get_stocks requires an industry.
-6. When a specific stock is requested but no industry is stated:
-   - use the most plausible industry only as a routing hypothesis;
-   - call get_stocks with that industry;
-   - verify that the requested symbol exists in the returned rows;
-   - if it is not present, try another plausible industry when reasonable;
-   - only report unavailable after the valid tool routes are exhausted.
-7. Never present an inferred industry as verified until the MCP stock result confirms it.
-8. If the user explicitly gives an industry, use the exact industry value from the live PSX industry catalog.
-9. If an industry term maps to multiple live industries, do not guess. Ask the user to choose.
-10. Follow-up questions may depend on the recent conversation. Reuse a clear stock, industry, ranking, or metric context from earlier messages.
-11. For ranking requests:
-    - top change = highest change percentage;
-    - bottom change = lowest change percentage;
-    - top volume = highest trading volume;
-    - bottom volume = lowest trading volume.
-12. Preserve MCP values exactly. Do not round or alter values unless only formatting for readability.
-13. If tool output is empty or does not contain the requested symbol, do not fabricate a result.
-14. Greetings and casual conversation do not require MCP tools.
-15. Give direct, concise answers. Use markdown tables for multiple stock rows when useful.
-16. Do not provide guaranteed returns, personalized investment advice, or unsupported recommendations.
-""".strip()
+IMPORTANT DATA-GROUNDING RULES:
 
-    # ------------------------------------------------------------------
-    # LLM
-    # ------------------------------------------------------------------
+1. Any question asking for PSX facts, stock data, symbols,
+   industries, rankings, changes, volumes, or other market
+   information MUST be answered using MCP data.
+
+2. Never answer a PSX factual question from your pretrained
+   knowledge.
+
+3. Never use external websites, web search, outside databases,
+   or unstated information as a source of PSX facts.
+
+4. The MCP tools and their returned data are the source of truth
+   for PSX information in this chatbot.
+
+5. Dynamically understand the user's question and select the
+   MCP tool or tools that can provide the required information.
+
+6. Do not depend on predefined questions or fixed keyword
+   patterns. Users may ask PSX questions naturally in different
+   ways.
+
+7. You may call multiple MCP tools when a question requires
+   information from more than one source.
+
+8. Use conversation history to understand follow-up questions
+   and references to previous results.
+
+9. After receiving MCP results, analyze, compare, summarize,
+   filter, or explain those results when appropriate.
+
+10. Any PSX factual claim in your final answer must be supported
+    by the MCP data retrieved during the current conversation.
+
+11. Do not introduce unsupported PSX facts from your own
+    knowledge.
+
+12. If the available MCP data does not contain the information
+    required to answer the question, clearly say that the
+    requested information is not available in the current PSX
+    data.
+
+13. If an MCP tool fails or returns no useful data, do not
+    fabricate an answer. Explain that the requested data could
+    not be retrieved.
+
+14. Do not describe data as real-time unless the underlying
+    PSX data source actually provides real-time data.
+
+15. You are a data assistant, not a financial advisor.
+
+16. Keep answers clear, concise, and useful.
+
+For non-PSX conversational questions such as greetings, respond
+normally without unnecessarily calling PSX tools.
+"""
+
+    # ---------------------------------------------------------
+    # LLM CALL
+    # ---------------------------------------------------------
 
     async def _ask_llm(
         self,
         client: Any,
-        messages: list[
-            dict[str, Any]
-        ],
-        tools: list[
-            dict[str, Any]
-        ],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
     ) -> Any:
+
+        kwargs: dict[str, Any] = {
+            "model": LLM_MODEL,
+            "messages": messages,
+        }
+
+        if tools:
+            kwargs["tools"] = tools
+
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
+            else:
+                kwargs["tool_choice"] = "auto"
+
         return await client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            tools=tools or None,
-            tool_choice=(
-                "auto"
-                if tools
-                else None
-            ),
-            temperature=0,
+            **kwargs
         )
 
-    # ------------------------------------------------------------------
-    # Tool arguments parser
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------
+    # TOOL ARGUMENT PARSER
+    # ---------------------------------------------------------
 
-    @staticmethod
     def _parse_tool_arguments(
-        raw_arguments: str | None,
-    ) -> dict[str, Any]:
-        raw_arguments = (
-            raw_arguments
-            or "{}"
-        )
-
-        try:
-            parsed = json.loads(
-                raw_arguments
-            )
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Invalid JSON tool arguments"
-            ) from exc
-
-        if not isinstance(
-            parsed,
-            dict,
-        ):
-            raise ValueError(
-                "Tool arguments must be a JSON object."
-            )
-
-        return parsed
-
-    # ------------------------------------------------------------------
-    # Build dynamic context hints
-    # ------------------------------------------------------------------
-
-    async def _build_context_hints(
         self,
-        session: Any,
-        question: str,
-        history: list | None,
-    ) -> list[str]:
-        hints: list[str] = []
+        arguments: Any,
+    ) -> dict[str, Any]:
 
-        # --------------------------------------------------------------
-        # Verify requested stock symbols when appropriate.
-        # --------------------------------------------------------------
+        if arguments is None:
+            return {}
 
-        (
-            matched_symbols,
-            matched_names,
-            routing_hint,
-        ) = await self._find_requested_symbols(
-            session,
-            question,
-            history,
-        )
+        if isinstance(arguments, dict):
+            return arguments
 
-        if matched_symbols:
-            hints.append(
-                "Live MCP symbol verification found: "
-                + ", ".join(
-                    matched_symbols
-                )
-                + "."
-            )
+        if isinstance(arguments, str):
 
-            if matched_names:
-                hints.append(
-                    "Matching company names: "
-                    + ", ".join(
-                        matched_names
-                    )
-                    + "."
-                )
+            try:
+                parsed = json.loads(arguments)
 
-            if routing_hint:
-                hints.append(
-                    "Routing hint only — verify through get_stocks before stating the industry: "
-                    + routing_hint
-                    + "."
-                )
+                if isinstance(parsed, dict):
+                    return parsed
 
-        # --------------------------------------------------------------
-        # Resolve explicit/current industry.
-        # --------------------------------------------------------------
+            except json.JSONDecodeError:
+                return {}
 
-        combined_current = question
+        return {}
 
-        industry_signal = any(
-            token in self._normalize_text(
-                combined_current
-            )
-            for token in (
-                "bank",
-                "banking",
-                "banks",
-                "textile",
-                "technology",
-                "tech",
-                "pharma",
-                "pharmaceutical",
-                "chemical",
-                "chemicals",
-                "cement",
-                "fertilizer",
-                "insurance",
-                "automobile",
-                "automotive",
-                "oil",
-                "gas",
-                "paper",
-                "power",
-                "property",
-                "real estate",
-                "transport",
-                "engineering",
-                "sugar",
-                "tobacco",
-                "leather",
-                "jute",
-                "glass",
-                "ceramic",
-                "refinery",
-                "wool",
-                "sector",
-                "industry",
-            )
-        )
-
-        if industry_signal:
-            industry, ambiguous = (
-                await self._resolve_industry_hint(
-                    session,
-                    combined_current,
-                )
-            )
-
-            if industry:
-                hints.append(
-                    "Current live industry match: "
-                    + industry
-                    + "."
-                )
-
-            if ambiguous:
-                hints.append(
-                    "The current industry wording is ambiguous. Valid live candidates are: "
-                    + ", ".join(
-                        ambiguous
-                    )
-                    + ". Do not guess; ask the user to choose."
-                )
-
-        # --------------------------------------------------------------
-        # Follow-up industry context
-        # --------------------------------------------------------------
-
-        recent_user_context = (
-            self._recent_user_context(
-                history
-            )
-        )
-
-        if recent_user_context:
-            current_has_explicit_industry = (
-                industry_signal
-            )
-
-            if not current_has_explicit_industry:
-                previous_industry, previous_ambiguous = (
-                    await self._resolve_industry_hint(
-                        session,
-                        recent_user_context,
-                    )
-                )
-
-                if previous_industry:
-                    hints.append(
-                        "Recent conversation context suggests industry: "
-                        + previous_industry
-                        + ". Use it for a clear follow-up unless the user changes the subject."
-                    )
-
-                if previous_ambiguous:
-                    hints.append(
-                        "Recent conversation contains ambiguous industry context: "
-                        + ", ".join(
-                            previous_ambiguous
-                        )
-                        + ". Do not guess."
-                    )
-
-        return hints
-
-    # ------------------------------------------------------------------
-    # Main async chatbot flow
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------
+    # MAIN CHAT FLOW
+    # ---------------------------------------------------------
 
     async def _chat_async(
         self,
-        user_message: str,
-        history: list | None = None,
+        question: str,
+        history: list[dict[str, Any]] | None = None,
     ) -> str:
+
         self.last_tool = None
-        self.last_arguments = {}
-        self.last_debug = None
-        self.requested_symbols = set()
+        self.last_arguments = None
+        self.last_debug = []
 
         try:
-            async with mcp_session() as session:
 
-                await self._load_tools(
-                    session
-                )
+            # -------------------------------------------------
+            # CONNECT TO MCP
+            # -------------------------------------------------
 
-                # ------------------------------------------------------
-                # Simple deterministic route.
-                # ------------------------------------------------------
+            async with streamable_http_client(
+    MCP_SERVER_URL
+) as (
+    read_stream,
+    write_stream,
+):
 
-                (
-                    direct_tool,
-                    direct_arguments,
-                ) = await self._detect_direct_tool(
-                    session,
-                    user_message,
-                    history,
-                )
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                ) as session:
 
-                if direct_tool:
-                    try:
-                        result = await self._call_tool(
-                            session,
-                            direct_tool,
-                            direct_arguments,
+                    await session.initialize()
+
+                    # -----------------------------------------
+                    # LOAD ALL AVAILABLE MCP TOOLS
+                    # -----------------------------------------
+
+                    await self._load_tools(session)
+
+                    if not self.tools:
+                        return (
+                            "No PSX MCP tools are currently "
+                            "available."
                         )
 
-                        return self._format_tool_result(
-                            direct_tool,
-                            result,
-                        )
+                    openai_tools = self._openai_tools()
 
-                    except Exception:
-                        # Fall through to LLM route.
-                        pass
+                    # -----------------------------------------
+                    # LLM CLIENT
+                    # -----------------------------------------
 
-                # ------------------------------------------------------
-                # LLM route
-                # ------------------------------------------------------
+                    client = create_llm_client()
 
-                llm_client = create_llm_client()
-                openai_tools = (
-                    self._openai_tools()
-                )
+                    # -----------------------------------------
+                    # MESSAGE HISTORY
+                    # -----------------------------------------
 
-                messages: list[
-                    dict[str, Any]
-                ] = [
-                    {
-                        "role": "system",
-                        "content": self._system_prompt(),
-                    }
-                ]
-
-                # ------------------------------------------------------
-                # Preserve recent conversation
-                # ------------------------------------------------------
-
-                if history:
-                    for item in history:
-                        if not isinstance(
-                            item,
-                            dict,
-                        ):
-                            continue
-
-                        role = item.get(
-                            "role"
-                        )
-
-                        content = item.get(
-                            "content"
-                        )
-
-                        if (
-                            role
-                            in {
-                                "user",
-                                "assistant",
-                            }
-                            and content
-                        ):
-                            messages.append(
-                                {
-                                    "role": role,
-                                    "content": str(
-                                        content
-                                    ),
-                                }
-                            )
-
-                # ------------------------------------------------------
-                # Dynamic routing hints.
-                # These are compact and only added when useful.
-                # ------------------------------------------------------
-
-                context_hints = (
-                    await self._build_context_hints(
-                        session,
-                        user_message,
-                        history,
-                    )
-                )
-
-                if context_hints:
-                    messages.append(
+                    messages: list[dict[str, Any]] = [
                         {
                             "role": "system",
-                            "content": (
-                                "Relevant routing context from live MCP lookup:\n"
-                                + "\n".join(
-                                    f"- {hint}"
-                                    for hint in context_hints
+                            "content": self._system_prompt(),
+                        }
+                    ]
+
+                    if history:
+
+                        for item in history:
+
+                            role = item.get("role")
+                            content = item.get("content")
+
+                            if role in {
+                                "user",
+                                "assistant",
+                            } and content:
+
+                                messages.append(
+                                    {
+                                        "role": role,
+                                        "content": content,
+                                    }
                                 )
-                            ),
+
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": question,
                         }
                     )
 
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": user_message,
-                    }
-                )
+                    # -----------------------------------------
+                    # LLM ↔ MCP TOOL LOOP
+                    # -----------------------------------------
 
-                total_tool_calls = 0
+                    total_tool_calls = 0
 
-                # ------------------------------------------------------
-                # Multi-round tool-calling loop
-                # ------------------------------------------------------
-
-                for _ in range(
-                    MAX_TOOL_ITERATIONS
-                ):
-                    response = await self._ask_llm(
-                        llm_client,
-                        messages,
-                        openai_tools,
-                    )
-
-                    if not response.choices:
-                        return (
-                            "I could not generate a response."
-                        )
-
-                    message = (
-                        response.choices[0].message
-                    )
-
-                    tool_calls = getattr(
-                        message,
-                        "tool_calls",
-                        None,
-                    )
-
-                    # --------------------------------------------------
-                    # No more tools → final chatbot answer
-                    # --------------------------------------------------
-
-                    if not tool_calls:
-                        return (
-                            message.content
-                            or "I could not generate a response."
-                        )
-
-                    # --------------------------------------------------
-                    # Preserve assistant tool call message
-                    # --------------------------------------------------
-
-                    assistant_message: dict[
-                        str,
-                        Any,
-                    ] = {
-                        "role": "assistant",
-                        "content": (
-                            message.content
-                            or ""
-                        ),
-                        "tool_calls": [],
-                    }
-
-                    for tool_call in (
-                        tool_calls
+                    for _iteration in range(
+                        MAX_TOOL_ITERATIONS
                     ):
-                        function = (
-                            tool_call.function
+
+                        response = await self._ask_llm(
+                            client=client,
+                            messages=messages,
+                            tools=openai_tools,
+                            tool_choice="auto",
                         )
 
-                        assistant_message[
-                            "tool_calls"
-                        ].append(
+                        if not response.choices:
+                            return (
+                                "I could not generate an answer "
+                                "for that request."
+                            )
+
+                        message = response.choices[0].message
+
+                        tool_calls = (
+                            getattr(
+                                message,
+                                "tool_calls",
+                                None,
+                            )
+                            or []
+                        )
+
+                        # -------------------------------------
+                        # NO TOOL CALL
+                        # -------------------------------------
+
+                        if not tool_calls:
+
+                            answer = (
+                                getattr(
+                                    message,
+                                    "content",
+                                    None,
+                                )
+                                or ""
+                            ).strip()
+
+                            if answer:
+                                return answer
+
+                            return (
+                                "I could not generate a useful "
+                                "answer for that request."
+                            )
+
+                        # -------------------------------------
+                        # STORE ASSISTANT TOOL CALL MESSAGE
+                        # -------------------------------------
+
+                        assistant_tool_calls = []
+
+                        for tool_call in tool_calls:
+
+                            function = tool_call.function
+
+                            assistant_tool_calls.append(
+                                {
+                                    "id": tool_call.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": function.name,
+                                        "arguments": (
+                                            function.arguments
+                                            or "{}"
+                                        ),
+                                    },
+                                }
+                            )
+
+                        messages.append(
                             {
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": (
-                                        function.name
-                                    ),
-                                    "arguments": (
-                                        function.arguments
-                                        or "{}"
-                                    ),
-                                },
+                                "role": "assistant",
+                                "content": (
+                                    getattr(
+                                        message,
+                                        "content",
+                                        None,
+                                    )
+                                    or ""
+                                ),
+                                "tool_calls": (
+                                    assistant_tool_calls
+                                ),
                             }
                         )
 
-                    messages.append(
-                        assistant_message
-                    )
+                        # -------------------------------------
+                        # EXECUTE MCP TOOLS
+                        # -------------------------------------
 
-                    # --------------------------------------------------
-                    # Execute every tool requested in this round
-                    # --------------------------------------------------
+                        for tool_call in tool_calls:
 
-                    for tool_call in (
-                        tool_calls
-                    ):
-                        total_tool_calls += 1
+                            total_tool_calls += 1
 
-                        if (
-                            total_tool_calls
-                            > MAX_TOOL_CALLS
-                        ):
-                            return (
-                                "The request required too many tool calls and was stopped safely."
-                            )
+                            if (
+                                total_tool_calls
+                                > MAX_TOOL_CALLS
+                            ):
+                                return (
+                                    "I stopped the request because "
+                                    "too many data-tool calls were "
+                                    "required."
+                                )
 
-                        function = (
-                            tool_call.function
-                        )
+                            function = tool_call.function
 
-                        tool_name = (
-                            function.name
-                        )
+                            tool_name = function.name
 
-                        arguments: dict[
-                            str,
-                            Any,
-                        ] = {}
-
-                        try:
                             arguments = (
                                 self._parse_tool_arguments(
                                     function.arguments
                                 )
                             )
 
-                            if tool_name not in (
-                                self.tool_map
+                            # -----------------------------
+                            # Validate actual MCP tool
+                            # -----------------------------
+
+                            if (
+                                tool_name
+                                not in self.tool_map
                             ):
-                                raise ValueError(
-                                    "Unknown MCP tool requested: "
-                                    + tool_name
+
+                                tool_output = json.dumps(
+                                    {
+                                        "error": (
+                                            f"MCP tool "
+                                            f"'{tool_name}' "
+                                            "is not available."
+                                        )
+                                    }
                                 )
 
-                            # --------------------------------------------------
-                            # For get_stocks, preserve exact stock filtering
-                            # context when the user requested specific symbols.
-                            # --------------------------------------------------
+                            else:
 
-                            tool_result = (
-                                await self._call_tool(
-                                    session,
-                                    tool_name,
-                                    arguments,
-                                )
-                            )
+                                try:
 
-                            llm_content = (
-                                self._tool_result_for_llm(
-                                    tool_name,
-                                    tool_result,
-                                )
-                            )
+                                    result = (
+                                        await self._call_tool(
+                                            session,
+                                            tool_name,
+                                            arguments,
+                                        )
+                                    )
 
-                        except Exception as tool_error:
+                                    data = (
+                                        self._extract_tool_result(
+                                            result
+                                        )
+                                    )
 
-                            self.last_debug = {
-                                "status": "error",
-                                "tool": tool_name,
-                                "arguments": arguments,
-                                "result_received": False,
-                                "error": str(
-                                    tool_error
-                                ),
-                            }
+                                    # ---------------------------------
+                                    # IMPORTANT:
+                                    # Send raw/complete MCP data back
+                                    # to LLM instead of returning the
+                                    # formatter directly to the user.
+                                    # ---------------------------------
 
-                            llm_content = json.dumps(
+                                    tool_output = (
+                                        self._tool_result_for_llm(
+                                            tool_name,
+                                            data,
+                                        )
+                                    )
+
+                                except Exception as exc:
+
+                                    self.last_debug.append(
+                                        {
+                                            "tool": tool_name,
+                                            "arguments": arguments,
+                                            "success": False,
+                                            "error": str(exc),
+                                        }
+                                    )
+
+                                    tool_output = json.dumps(
+                                        {
+                                            "tool": tool_name,
+                                            "error": (
+                                                "The MCP tool "
+                                                "could not retrieve "
+                                                "the requested data."
+                                            ),
+                                        },
+                                        ensure_ascii=False,
+                                    )
+
+                            # -----------------------------
+                            # Return MCP result to LLM
+                            # -----------------------------
+
+                            messages.append(
                                 {
-                                    "tool": tool_name,
-                                    "error": str(
-                                        tool_error
+                                    "role": "tool",
+                                    "tool_call_id": (
+                                        tool_call.id
                                     ),
-                                },
-                                ensure_ascii=False,
+                                    "content": tool_output,
+                                }
                             )
 
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": (
-                                    tool_call.id
-                                ),
-                                "content": llm_content,
-                            }
-                        )
+                    # -------------------------------------------------
+                    # MAX ITERATIONS
+                    # -------------------------------------------------
 
-                return (
-                    "I was unable to complete the request within the allowed tool-call limit."
-                )
+                    return (
+                        "I could not complete the request within "
+                        "the allowed data retrieval steps."
+                    )
 
-        except Exception as error:
+        except Exception as exc:
 
-            self.last_debug = {
-                "status": "connection_error",
-                "tool": self.last_tool,
-                "arguments": self.last_arguments,
-                "result_received": False,
-                "error": str(error),
-            }
-
-            return (
-                "I could not retrieve the requested PSX data right now. "
-                "Please try again."
+            self.last_debug.append(
+                {
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc!r}",
+                }
             )
 
-    # ------------------------------------------------------------------
-    # Public sync API
-    # ------------------------------------------------------------------
+            return (
+                f"DEBUG ERROR: {type(exc).__name__}: {exc!r}"
+            )
+
+    # ---------------------------------------------------------
+    # SYNC WRAPPER
+    # ---------------------------------------------------------
 
     def chat(
         self,
-        user_message: str,
-        history: list | None = None,
+        question: str,
+        history: list[dict[str, Any]] | None = None,
     ) -> str:
-        try:
-            asyncio.get_running_loop()
 
-        except RuntimeError:
-            return asyncio.run(
-                self._chat_async(
-                    user_message=user_message,
-                    history=history,
-                )
+        return asyncio.run(
+            self._chat_async(
+                question,
+                history,
             )
-
-        raise RuntimeError(
-            "chat() cannot be called from an active event loop. "
-            "Use: await PSXChatbot()._chat_async(...)"
         )
 
 
-# ----------------------------------------------------------------------
-# Public application entry point
-# ----------------------------------------------------------------------
+# -------------------------------------------------------------
+# PUBLIC FUNCTION
+# -------------------------------------------------------------
 
 def ask_chatbot(
-    user_message: str,
-    history: list | None = None,
+    question: str,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """
-    Stateless application entry point.
-
-    A fresh PSXChatbot is created per request so mutable debug state
-    is isolated between Streamlit users.
-    """
 
     chatbot = PSXChatbot()
 
     answer = chatbot.chat(
-        user_message=user_message,
-        history=history,
+        question,
+        history,
     )
 
     return {

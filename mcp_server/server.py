@@ -135,7 +135,151 @@ async def get_stocks(
         },
     )
 
+# =========================================================
+# TOOL 4 — GET STOCK BY SYMBOL
+# =========================================================
 
+@mcp.tool(
+    description=(
+        "Look up a specific PSX stock by its symbol. "
+        "Use this when the user asks about an individual "
+        "stock such as HBL, OGDC, MEBL, LUCK, etc. "
+        "Returns the stock's available PSX data including "
+        "current price, change, volume, market cap, and industry."
+    )
+)
+async def get_stock_by_symbol(
+    symbol: str,
+) -> dict:
+
+    symbol = symbol.strip().upper()
+
+    log(
+        "get_stock_by_symbol",
+        "started",
+        symbol=symbol,
+    )
+
+    # First verify that the symbol exists
+    symbols_result = await request_psx_api(
+        "/symbols"
+    )
+
+    symbols_data = symbols_result.get(
+        "data",
+        [],
+    )
+
+    available_symbols = {
+        str(item.get("symbol", "")).strip().upper()
+        for item in symbols_data
+        if isinstance(item, dict)
+    }
+
+    if symbol not in available_symbols:
+        return {
+            "found": False,
+            "symbol": symbol,
+            "message": (
+                f"{symbol} is not available in "
+                "the current PSX symbol data."
+            ),
+        }
+
+    # Get available industries
+    industries_result = await request_psx_api(
+        "/industries"
+    )
+
+    industries_data = industries_result.get(
+        "data",
+        [],
+    )
+
+    # Search the verified symbol across industries
+    for item in industries_data:
+
+        if isinstance(item, str):
+            industry = item
+
+        elif isinstance(item, dict):
+            industry = (
+                item.get("industry")
+                or item.get("name")
+                or item.get("sector")
+            )
+
+        else:
+            continue
+
+        if not industry:
+            continue
+
+        try:
+            stocks_result = await request_psx_api(
+                "/stocks",
+                params={
+                    "industry": industry,
+                },
+            )
+
+            stocks = stocks_result.get(
+                "data",
+                [],
+            )
+
+            for stock in stocks:
+
+                if not isinstance(stock, dict):
+                    continue
+
+                stock_symbol = str(
+                    stock.get("symbol", "")
+                ).strip().upper()
+
+                if stock_symbol == symbol:
+
+                    log(
+                        "get_stock_by_symbol",
+                        "success",
+                        symbol=symbol,
+                        industry=industry,
+                    )
+
+                    return {
+                        "found": True,
+                        "symbol": symbol,
+                        "industry": industry,
+                        "data": stock,
+                    }
+
+        except Exception as exc:
+
+            log(
+                "get_stock_by_symbol",
+                "industry_error",
+                symbol=symbol,
+                industry=industry,
+                error=str(exc),
+            )
+
+            continue
+
+    log(
+        "get_stock_by_symbol",
+        "not_found",
+        symbol=symbol,
+    )
+
+    return {
+        "found": False,
+        "symbol": symbol,
+        "message": (
+            f"{symbol} exists in the PSX symbol list, "
+            "but its financial data could not be found "
+            "in the available industry data."
+        ),
+    }
 # =========================================================
 # TOOL 4 — TOP 10 BY CHANGE
 # =========================================================

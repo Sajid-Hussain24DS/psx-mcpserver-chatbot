@@ -506,16 +506,21 @@ with st.sidebar:
     st.divider()
 
     with st.expander("MCP Debug", expanded=False):
+
         debug = st.session_state.last_debug
+
 
         if not debug:
             st.caption("No MCP request has been captured yet.")
         else:
-            status = debug.get("status", "unknown")
-            tool = debug.get("tool") or "No tool"
-            arguments = debug.get("arguments") or {}
-            duration = debug.get("duration_ms")
-            error = debug.get("error")
+            latest_debug = debug[-1]
+
+            status = latest_debug.get("status", "unknown")
+            tool = latest_debug.get("tool") or "No tool"
+            arguments = latest_debug.get("arguments") or {}
+            duration = latest_debug.get("duration_ms")
+            error = latest_debug.get("error")
+            result_received = latest_debug.get("result_received")
 
             st.markdown(f"**Tool**  \n`{tool}`")
             st.markdown(f"**Status**  \n`{status}`")
@@ -523,7 +528,6 @@ with st.sidebar:
             if duration is not None:
                 st.markdown(f"**Duration**  \n`{duration} ms`")
 
-            result_received = debug.get("result_received")
             if result_received is not None:
                 result_label = "received" if result_received else "not received"
                 st.markdown(f"**Result**  \n`{result_label}`")
@@ -617,7 +621,8 @@ if question:
         with st.spinner("Retrieving PSX data..."):
             try:
                 result = ask_chatbot(
-                    user_message=question,
+                    
+                    question=question,
                     history=previous_messages,
                 )
 
