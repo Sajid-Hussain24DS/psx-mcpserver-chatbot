@@ -46,14 +46,6 @@ def log(
 
 
 
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request: Request):
-    return JSONResponse(
-        {
-            "status": "healthy",
-            "service": "PSX MCP Server",
-        }
-    )
 
 # =========================================================
 # FastMCP Server
@@ -63,6 +55,14 @@ mcp = FastMCP(
     "PSX MCP Server"
 )
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request):
+    return JSONResponse(
+        {
+            "status": "healthy",
+            "service": "PSX MCP Server",
+        }
+    )
 
 # =========================================================
 # TOOL 1 — GET SYMBOLS
