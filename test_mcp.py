@@ -8,19 +8,16 @@ from mcp.client.streamable_http import streamable_http_client
 
 load_dotenv()
 
-MCP_URL = os.getenv(
-    "MCP_SERVER_URL",
-    "https://fluttering-blue-ox.fastmcp.app/mcp",
-)
-
+MCP_URL = os.getenv("MCP_SERVER_URL")
 HORIZON_API_KEY = os.getenv("HORIZON_API_KEY")
 
 
 async def main():
+    if not MCP_URL:
+        raise RuntimeError("MCP_SERVER_URL is missing.")
+
     if not HORIZON_API_KEY:
-        raise RuntimeError(
-            "HORIZON_API_KEY is missing. Add it to your .env file."
-        )
+        raise RuntimeError("HORIZON_API_KEY is missing.")
 
     print(f"Connecting to: {MCP_URL}")
 
@@ -28,9 +25,16 @@ async def main():
         "Authorization": f"Bearer {HORIZON_API_KEY}",
     }
 
+    timeout = httpx.Timeout(
+        connect=30.0,
+        read=300.0,
+        write=30.0,
+        pool=30.0,
+    )
+
     async with httpx.AsyncClient(
         headers=headers,
-        timeout=httpx.Timeout(30.0, read=300.0),
+        timeout=timeout,
     ) as http_client:
 
         async with streamable_http_client(
@@ -56,7 +60,7 @@ async def main():
                 print("\nAvailable tools:")
 
                 for tool in tools.tools:
-                    print("-", tool.name)
+                    print(f"- {tool.name}")
 
                 print("\nCalling get_symbols...")
 

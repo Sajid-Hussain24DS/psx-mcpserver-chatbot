@@ -2913,7 +2913,7 @@ load_dotenv()
 
 MCP_SERVER_URL = os.getenv(
     "MCP_SERVER_URL",
-    "https://fluttering-blue-ox.fastmcp.app/mcp",
+    "https://sore-tan-dove.fastmcp.app/mcp",
 )
 
 LLM_PROVIDER = os.getenv(
