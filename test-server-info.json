@@ -1,0 +1,220 @@
+{
+  "server": {
+    "name": "PSX MCP Server",
+    "instructions": null,
+    "version": "4.0.10",
+    "website_url": null,
+    "icons": null,
+    "generation": 2,
+    "capabilities": {
+      "tools": {
+        "listChanged": true
+      },
+      "resources": {
+        "subscribe": false,
+        "listChanged": false
+      },
+      "prompts": {
+        "listChanged": false
+      },
+      "logging": {}
+    }
+  },
+  "environment": {
+    "fastmcp": "4.0.10",
+    "mcp": "2.2.0"
+  },
+  "tools": [
+    {
+      "key": "tool:get_symbols@",
+      "name": "get_symbols",
+      "description": "Get the list of available PSX stock symbols.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "tool:get_industries@",
+      "name": "get_industries",
+      "description": "Get the list of available PSX industries.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "tool:get_stocks@",
+      "name": "get_stocks",
+      "description": "Get all PSX stocks belonging to a specific industry.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "industry": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "industry"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "tool:get_top_change@",
+      "name": "get_top_change",
+      "description": "Get the top 10 PSX stocks by change percentage.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "industry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "tool:get_bottom_change@",
+      "name": "get_bottom_change",
+      "description": "Get the bottom 10 PSX stocks by change percentage.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "industry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "tool:get_top_volume@",
+      "name": "get_top_volume",
+      "description": "Get the top 10 PSX stocks by trading volume.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "industry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "tool:get_bottom_volume@",
+      "name": "get_bottom_volume",
+      "description": "Get the bottom 10 PSX stocks by trading volume.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "industry": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    }
+  ],
+  "prompts": [],
+  "resources": [],
+  "templates": []
+}
