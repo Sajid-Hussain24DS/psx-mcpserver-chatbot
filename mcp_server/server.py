@@ -8,6 +8,9 @@ try:
 except ModuleNotFoundError:
     from api_client import request_psx_api
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 # =========================================================
 # Logging
 # =========================================================
@@ -41,6 +44,16 @@ def log(
         f"data={data}"
     )
 
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request):
+    return JSONResponse(
+        {
+            "status": "healthy",
+            "service": "PSX MCP Server",
+        }
+    )
 
 # =========================================================
 # FastMCP Server
