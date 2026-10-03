@@ -2,7 +2,7 @@ import logging
 import sys
 
 from fastmcp import FastMCP
-
+import os
 try:
     from mcp_server.api_client import request_psx_api
 except ModuleNotFoundError:
@@ -418,8 +418,8 @@ if __name__ == "__main__":
     )
 
     mcp.run(
-        transport="streamable-http",
-        host="0.0.0.0",
-        port=5173,
-        path="/mcp",
-    )
+    transport="streamable-http",
+    host="0.0.0.0",
+    port=int(os.getenv("PORT", "5173")),
+    path="/mcp",
+)
