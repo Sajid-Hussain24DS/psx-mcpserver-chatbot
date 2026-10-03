@@ -437,136 +437,251 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+        /* =========================================================
+           PSX INTELLIGENCE — MONOCHROME BLACK UI
+           ========================================================= */
+
         :root {
-            --bg: #0b0f14;
-            --sidebar: #10151c;
-            --surface: #151b23;
-            --surface-2: #1a212b;
-            --border: #293340;
-            --text: #f5f7fa;
-            --muted: #9aa6b2;
-            --accent: #ff4d4f;
-            --accent-hover: #ff5f61;
+            --bg: #000000;
+            --sidebar: #050505;
+            --surface: #0b0b0b;
+            --surface-2: #111111;
+            --surface-3: #151515;
+            --border: #242424;
+            --border-light: #303030;
+
+            --text: #f2f2f2;
+            --text-soft: #d4d4d4;
+            --muted: #8a8a8a;
+            --muted-dark: #666666;
+
+            --hover: #171717;
+            --active: #1c1c1c;
+            --input: #0d0d0d;
         }
+
+        /* ---------------------------------------------------------
+           GLOBAL
+           --------------------------------------------------------- */
 
         .stApp {
             background: var(--bg);
             color: var(--text);
         }
 
-        .block-container {
-            max-width: 1000px;
-            padding-top: 1.5rem;
-            padding-bottom: 1.5rem;
+        html,
+        body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > .main {
+            background: var(--bg) !important;
         }
+
+        .block-container {
+            max-width: 980px;
+            padding-top: 1.8rem;
+            padding-bottom: 2rem;
+        }
+
+        /* Remove Streamlit default decorative spacing */
+        header[data-testid="stHeader"] {
+            background: transparent !important;
+        }
+
+        /* ---------------------------------------------------------
+           SIDEBAR
+           --------------------------------------------------------- */
 
         section[data-testid="stSidebar"] {
             width: 260px !important;
-            background: var(--sidebar);
+            background: var(--sidebar) !important;
             border-right: 1px solid var(--border);
         }
 
-        section[data-testid="stSidebar"] .block-container {
-            padding: 1rem 0.9rem;
+        section[data-testid="stSidebar"] > div {
+            background: var(--sidebar) !important;
         }
 
+        section[data-testid="stSidebar"] .block-container {
+            padding: 1.2rem 0.9rem;
+        }
+
+        /* ---------------------------------------------------------
+           BRAND
+           --------------------------------------------------------- */
+
         .brand {
-            padding: 0.2rem 0.1rem 1rem;
+            padding: 0.15rem 0.15rem 1.2rem;
         }
 
         .brand-title {
-            color: var(--text);
-            font-size: 1.05rem;
+            color: #ffffff;
+            font-size: 1.02rem;
             font-weight: 700;
+            letter-spacing: -0.01em;
         }
 
         .brand-subtitle {
-            margin-top: 0.2rem;
+            margin-top: 0.28rem;
             color: var(--muted);
-            font-size: 0.76rem;
-            line-height: 1.4;
+            font-size: 0.74rem;
+            line-height: 1.45;
         }
 
+        /* ---------------------------------------------------------
+           HERO
+           --------------------------------------------------------- */
+
         .hero {
-            background: var(--surface);
+            background: linear-gradient(
+                180deg,
+                #0c0c0c 0%,
+                #090909 100%
+            );
             border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 1rem 1.1rem;
-            margin-bottom: 1rem;
+            border-radius: 12px;
+            padding: 1.25rem 1.3rem;
+            margin-bottom: 1.15rem;
         }
 
         .hero h1 {
-            color: var(--text);
+            color: #ffffff;
             margin: 0;
-            font-size: 1.35rem;
+            font-size: 1.4rem;
             font-weight: 700;
+            letter-spacing: -0.025em;
         }
 
         .hero p {
             color: var(--muted);
-            margin: 0.35rem 0 0;
-            font-size: 0.82rem;
+            margin: 0.4rem 0 0;
+            font-size: 0.8rem;
+            line-height: 1.5;
         }
 
+        /* ---------------------------------------------------------
+           STATUS
+           --------------------------------------------------------- */
+
         .status {
-            display: inline-block;
-            margin-top: 0.65rem;
-            padding: 0.25rem 0.5rem;
-            border: 1px solid #334155;
+            display: inline-flex;
+            align-items: center;
+            margin-top: 0.75rem;
+            padding: 0.28rem 0.55rem;
+            border: 1px solid var(--border);
             border-radius: 6px;
-            background: #111821;
-            color: #b8c4d1;
-            font-size: 0.7rem;
+            background: #080808;
+            color: #999999;
+            font-size: 0.68rem;
         }
 
         .status-dot {
             display: inline-block;
-            width: 6px;
-            height: 6px;
-            margin-right: 0.35rem;
+            width: 5px;
+            height: 5px;
+            margin-right: 0.38rem;
             border-radius: 50%;
-            background: #22c55e;
+            background: #8a8a8a;
         }
 
+        /* ---------------------------------------------------------
+           SECTION LABELS
+           --------------------------------------------------------- */
+
         .section-label {
-            color: #d6dce3;
-            font-size: 0.68rem;
+            color: #bdbdbd;
+            font-size: 0.65rem;
             font-weight: 700;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.1em;
             text-transform: uppercase;
-            margin: 0.3rem 0 0.5rem;
+            margin: 0.35rem 0 0.55rem;
         }
 
         .sidebar-note {
             color: var(--muted);
-            font-size: 0.74rem;
-            line-height: 1.55;
+            font-size: 0.72rem;
+            line-height: 1.6;
         }
+
+        /* ---------------------------------------------------------
+           SIDEBAR BUTTONS
+           --------------------------------------------------------- */
+
+        section[data-testid="stSidebar"] button {
+            background: transparent !important;
+            color: #cfcfcf !important;
+            border: 1px solid transparent !important;
+            border-radius: 7px !important;
+            box-shadow: none !important;
+            transition: background 0.15s ease,
+                        border-color 0.15s ease;
+        }
+
+        section[data-testid="stSidebar"] button:hover {
+            background: var(--hover) !important;
+            border-color: var(--border) !important;
+            color: #ffffff !important;
+        }
+
+        section[data-testid="stSidebar"] button[kind="primary"] {
+            background: #151515 !important;
+            color: #ffffff !important;
+            border: 1px solid var(--border-light) !important;
+        }
+
+        section[data-testid="stSidebar"] button[kind="primary"]:hover {
+            background: #1b1b1b !important;
+            border-color: #3a3a3a !important;
+        }
+
+        /* ---------------------------------------------------------
+           DIVIDERS
+           --------------------------------------------------------- */
+
+        hr {
+            border-color: var(--border) !important;
+            opacity: 1 !important;
+        }
+
+        /* ---------------------------------------------------------
+           DEBUG CARD
+           --------------------------------------------------------- */
 
         .debug-card {
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 8px;
-            padding: 0.7rem;
-            margin-top: 0.5rem;
+            padding: 0.75rem;
+            margin-top: 0.55rem;
         }
+
+        /* ---------------------------------------------------------
+           SUGGESTION CARD
+           --------------------------------------------------------- */
 
         .suggestion {
-            color: #c7d0da;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 0.7rem 0.8rem;
-            font-size: 0.82rem;
-            line-height: 1.5;
-        }
-
-        [data-testid="stChatMessage"] {
+            color: var(--text-soft);
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 9px;
-            padding: 0.15rem 0.7rem;
-            margin-bottom: 0.5rem;
+            padding: 0.75rem 0.85rem;
+            font-size: 0.8rem;
+            line-height: 1.55;
+        }
+
+        /* ---------------------------------------------------------
+           CHAT MESSAGES
+           --------------------------------------------------------- */
+
+        [data-testid="stChatMessage"] {
+            background: var(--surface) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 10px !important;
+            padding: 0.2rem 0.75rem !important;
+            margin-bottom: 0.55rem !important;
+        }
+
+        [data-testid="stChatMessage"]:hover {
+            border-color: #2d2d2d !important;
         }
 
         [data-testid="stChatMessage"] p,
@@ -576,78 +691,149 @@ st.markdown(
             color: var(--text) !important;
         }
 
+        [data-testid="stChatMessage"] strong {
+            color: #ffffff !important;
+        }
+
+        /* ---------------------------------------------------------
+           CHAT TABLES
+           --------------------------------------------------------- */
+
         [data-testid="stChatMessage"] table {
             width: 100%;
-            color: var(--text);
+            border-collapse: collapse;
+            color: var(--text) !important;
+            background: var(--surface) !important;
         }
 
         [data-testid="stChatMessage"] thead tr {
-            background: var(--surface-2);
+            background: var(--surface-2) !important;
         }
 
         [data-testid="stChatMessage"] th,
         [data-testid="stChatMessage"] td {
             border-color: var(--border) !important;
+            color: var(--text) !important;
         }
 
+        [data-testid="stChatMessage"] th {
+            color: #d6d6d6 !important;
+            font-weight: 600;
+        }
+
+        [data-testid="stChatMessage"] tr:nth-child(even) {
+            background: #0d0d0d !important;
+        }
+
+        [data-testid="stChatMessage"] tr:hover {
+            background: #141414 !important;
+        }
+
+        /* ---------------------------------------------------------
+           CHAT INPUT
+           --------------------------------------------------------- */
+
         [data-testid="stChatInput"] {
-            margin-top: 0.75rem;
+            margin-top: 0.9rem;
         }
 
         [data-testid="stChatInput"] > div {
-            background: #11161d;
-            border: 1px solid #3a4654;
-            border-radius: 9px;
+            background: var(--input) !important;
+            border: 1px solid #2a2a2a !important;
+            border-radius: 10px !important;
+            box-shadow: none !important;
+        }
+
+        [data-testid="stChatInput"] > div:focus-within {
+            border-color: #444444 !important;
+            box-shadow: none !important;
         }
 
         [data-testid="stChatInput"] textarea {
-            color: var(--text) !important;
-            -webkit-text-fill-color: var(--text) !important;
+            color: #f5f5f5 !important;
+            -webkit-text-fill-color: #f5f5f5 !important;
+            caret-color: #ffffff !important;
         }
 
         [data-testid="stChatInput"] textarea::placeholder {
-            color: #7f8b98 !important;
+            color: #707070 !important;
             opacity: 1 !important;
         }
 
-        section[data-testid="stSidebar"] button {
-            background: transparent;
-            color: #dce2e8;
-            border: 1px solid transparent;
-            border-radius: 7px;
-        }
-
-        section[data-testid="stSidebar"] button:hover {
-            background: #171e27;
-            border-color: var(--border);
-        }
-
-        section[data-testid="stSidebar"] button[kind="primary"] {
-            background: var(--accent);
-            color: #ffffff;
-            border-color: var(--accent);
-        }
-
-        section[data-testid="stSidebar"] button[kind="primary"]:hover {
-            background: var(--accent-hover);
-            border-color: var(--accent-hover);
-        }
+        /* ---------------------------------------------------------
+           EXPANDER
+           --------------------------------------------------------- */
 
         [data-testid="stExpander"] {
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 8px;
+            background: transparent !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 8px !important;
         }
 
-        .stMarkdown, .stCaption {
+        [data-testid="stExpander"] summary {
+            color: #cfcfcf !important;
+        }
+
+        [data-testid="stExpander"] summary:hover {
+            color: #ffffff !important;
+        }
+
+        /* ---------------------------------------------------------
+           STREAMLIT TEXT
+           --------------------------------------------------------- */
+
+        .stMarkdown,
+        .stCaption {
             color: var(--text);
         }
 
+        .stCaption {
+            color: var(--muted) !important;
+        }
+
+        /* ---------------------------------------------------------
+           GENERAL INPUT / SELECT ELEMENTS
+           --------------------------------------------------------- */
+
+        input,
+        textarea,
+        select {
+            background-color: var(--input) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+
+        /* ---------------------------------------------------------
+           SCROLLBAR
+           --------------------------------------------------------- */
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #000000;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #252525;
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #383838;
+        }
+
+        /* ---------------------------------------------------------
+           FOOTER
+           --------------------------------------------------------- */
+
         .footer-note {
-            color: #6f7b88;
+            color: #5f5f5f;
             text-align: center;
-            font-size: 0.67rem;
-            margin-top: 1rem;
+            font-size: 0.65rem;
+            margin-top: 1.15rem;
         }
     </style>
     """,
