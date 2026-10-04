@@ -9,9 +9,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL")
-HORIZON_API_KEY = os.getenv("HORIZON_API_KEY")
-
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:5173/mcp")
 
 @asynccontextmanager
 async def mcp_session() -> AsyncIterator[ClientSession]:
@@ -21,15 +19,6 @@ async def mcp_session() -> AsyncIterator[ClientSession]:
             "MCP_SERVER_URL is not configured."
         )
 
-    if not HORIZON_API_KEY:
-        raise RuntimeError(
-            "HORIZON_API_KEY is not configured."
-        )
-
-    headers = {
-        "Authorization": f"Bearer {HORIZON_API_KEY}",
-    }
-
     timeout = httpx.Timeout(
         connect=30.0,
         read=300.0,
@@ -38,7 +27,7 @@ async def mcp_session() -> AsyncIterator[ClientSession]:
     )
 
     async with httpx.AsyncClient(
-        headers=headers,
+
         timeout=timeout,
     ) as http_client:
 

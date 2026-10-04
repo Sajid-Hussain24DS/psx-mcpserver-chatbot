@@ -419,7 +419,7 @@ if __name__ == "__main__":
 
     mcp.run(
     transport="streamable-http",
-    host="0.0.0.0",
-    port=int(os.getenv("PORT", "5173")),
+    host="127.0.0.1",
+    port=int(os.getenv("MCP_SERVER_PORT", "5173")),
     path="/mcp",
 )
