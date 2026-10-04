@@ -26,17 +26,9 @@ logger = logging.getLogger(
 # =========================================================
 
 PSX_API_URL = os.getenv(
-    "PSX_API_URL"
+    "PSX_API_URL",
+    "https://psx-stock-api.vercel.app",
 )
-
-
-if not PSX_API_URL:
-
-    raise RuntimeError(
-        "PSX_API_URL is not configured "
-        "in the environment."
-    )
-
 
 PSX_API_URL = PSX_API_URL.rstrip("/")
 
