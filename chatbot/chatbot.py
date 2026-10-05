@@ -8,6 +8,9 @@ import re
 import time
 from typing import Any
 
+
+from pathlib import Path
+import httpx
 from dotenv import load_dotenv
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -19,16 +22,13 @@ from chatbot.formatters import (
     format_top_bottom,
 )
 from chatbot.llm import create_llm_client
+from .mcp_client import mcp_session
 
 
+
+# .env project root mein hai (chatbot/ ke ek level upar)
 load_dotenv()
 
-
-MCP_SERVER_URL = os.getenv(
-    "MCP_SERVER_URL",
-    
-    "http://127.0.0.1:5173/mcp",
-)
 
 LLM_PROVIDER = os.getenv(
     "LLM_PROVIDER",
@@ -579,57 +579,44 @@ normally without unnecessarily calling PSX tools.
         self.last_debug = []
 
         try:
+            
 
-            # -------------------------------------------------
-            # CONNECT TO MCP
-            # -------------------------------------------------
 
-            async with streamable_http_client(
-    MCP_SERVER_URL
-) as (
-    read_stream,
-    write_stream,
-):
+            async with mcp_session() as session:
 
-                async with ClientSession(
-                    read_stream,
-                    write_stream,
-                ) as session:
+                # -----------------------------------------
+                # LOAD ALL AVAILABLE MCP TOOLS
+                # -----------------------------------------
 
-                    await session.initialize()
+                await self._load_tools(session)
 
-                    # -----------------------------------------
-                    # LOAD ALL AVAILABLE MCP TOOLS
-                    # -----------------------------------------
+                if not self.tools:
+                    return (
+                        "No PSX MCP tools are currently "
+                        "available."
+                    )
 
-                    await self._load_tools(session)
-
-                    if not self.tools:
-                        return (
-                            "No PSX MCP tools are currently "
-                            "available."
-                        )
-
-                    openai_tools = self._openai_tools()
+                openai_tools = self._openai_tools()
 
                     # -----------------------------------------
                     # LLM CLIENT
                     # -----------------------------------------
 
-                    client = create_llm_client()
+                client = create_llm_client()
 
                     # -----------------------------------------
                     # MESSAGE HISTORY
                     # -----------------------------------------
 
-                    messages: list[dict[str, Any]] = [
+                messages: list[dict[str, Any]] = [
                         {
                             "role": "system",
                             "content": self._system_prompt(),
                         }
                     ]
 
-                    if history:
+                if history:
+                        
 
                         for item in history:
 
@@ -648,7 +635,7 @@ normally without unnecessarily calling PSX tools.
                                     }
                                 )
 
-                    messages.append(
+                messages.append(
                         {
                             "role": "user",
                             "content": question,
@@ -659,9 +646,9 @@ normally without unnecessarily calling PSX tools.
                     # LLM ↔ MCP TOOL LOOP
                     # -----------------------------------------
 
-                    total_tool_calls = 0
+                total_tool_calls = 0
 
-                    for _iteration in range(
+                for _iteration in range(
                         MAX_TOOL_ITERATIONS
                     ):
 
@@ -873,7 +860,7 @@ normally without unnecessarily calling PSX tools.
                     # MAX ITERATIONS
                     # -------------------------------------------------
 
-                    return (
+                return (
                         "I could not complete the request within "
                         "the allowed data retrieval steps."
                     )

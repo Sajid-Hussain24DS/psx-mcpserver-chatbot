@@ -66,7 +66,7 @@ async def request_psx_api(
     try:
 
         async with httpx.AsyncClient(
-            timeout=30.0
+            timeout=300.0
         ) as client:
 
             response = await client.get(
