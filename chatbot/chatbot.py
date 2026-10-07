@@ -8,12 +8,8 @@ import re
 import time
 from typing import Any
 
-
-from pathlib import Path
-import httpx
 from dotenv import load_dotenv
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 
 from chatbot.formatters import (
     format_industries,
@@ -25,10 +21,11 @@ from chatbot.llm import create_llm_client
 from .mcp_client import mcp_session
 
 
+# -------------------------------------------------------------
+# ENVIRONMENT
+# -------------------------------------------------------------
 
-# .env project root mein hai (chatbot/ ke ek level upar)
 load_dotenv()
-
 
 LLM_PROVIDER = os.getenv(
     "LLM_PROVIDER",
@@ -40,12 +37,33 @@ LLM_MODEL = os.getenv(
     "openai/gpt-oss-120b",
 )
 
-MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "6"))
-MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "12"))
+MAX_TOOL_ITERATIONS = int(
+    os.getenv("MAX_TOOL_ITERATIONS", "6")
+)
 
+MAX_TOOL_CALLS = int(
+    os.getenv("MAX_TOOL_CALLS", "12")
+)
+
+
+# -------------------------------------------------------------
+# CHATBOT
+# -------------------------------------------------------------
 
 class PSXChatbot:
-    def __init__(self) -> None:
+
+    def __init__(
+        self,
+        llm_config: dict[str, Any] | None = None,
+    ) -> None:
+
+        self.llm_config = llm_config or {
+            "provider": "Default Groq",
+            "api_url": "",
+            "api_key": "",
+            "model": "",
+        }
+
         self.tools: list[Any] = []
         self.tool_map: dict[str, Any] = {}
 
@@ -57,17 +75,32 @@ class PSXChatbot:
     # TEXT HELPERS
     # ---------------------------------------------------------
 
-    def _normalize_text(self, text: str) -> str:
-        return re.sub(r"\s+", " ", text.strip().lower())
+    def _normalize_text(
+        self,
+        text: str,
+    ) -> str:
+
+        return re.sub(
+            r"\s+",
+            " ",
+            text.strip().lower(),
+        )
 
     # ---------------------------------------------------------
     # MCP
     # ---------------------------------------------------------
 
-    async def _load_tools(self, session: ClientSession) -> list[Any]:
+    async def _load_tools(
+        self,
+        session: ClientSession,
+    ) -> list[Any]:
+
         result = await session.list_tools()
 
-        self.tools = list(result.tools or [])
+        self.tools = list(
+            result.tools or []
+        )
+
         self.tool_map = {
             tool.name: tool
             for tool in self.tools
@@ -83,6 +116,7 @@ class PSXChatbot:
     ) -> Any:
 
         if tool_name not in self.tool_map:
+
             raise ValueError(
                 f"MCP tool '{tool_name}' is not available."
             )
@@ -97,7 +131,10 @@ class PSXChatbot:
             arguments,
         )
 
-        elapsed = round(time.time() - started, 3)
+        elapsed = round(
+            time.time() - started,
+            3,
+        )
 
         self.last_debug.append(
             {
@@ -111,11 +148,7 @@ class PSXChatbot:
         return result
 
     # ---------------------------------------------------------
-    # OPTIONAL INDUSTRY DETECTION HELPERS
-    #
-    # These are kept from the existing architecture.
-    # They are NOT used for routing anymore.
-    # The LLM now decides which MCP tool to call.
+    # OPTIONAL INDUSTRY DETECTION
     # ---------------------------------------------------------
 
     async def _find_industry_in_question(
@@ -125,13 +158,16 @@ class PSXChatbot:
     ) -> str | None:
 
         try:
+
             result = await self._call_tool(
                 session,
                 "get_industries",
                 {},
             )
 
-            data = self._extract_tool_result(result)
+            data = self._extract_tool_result(
+                result
+            )
 
             if not isinstance(data, list):
                 return None
@@ -139,34 +175,64 @@ class PSXChatbot:
             industries: list[str] = []
 
             for item in data:
+
                 if isinstance(item, str):
+
                     industries.append(item)
 
                 elif isinstance(item, dict):
-                    for key in ("industry", "name", "sector"):
+
+                    for key in (
+                        "industry",
+                        "name",
+                        "sector",
+                    ):
+
                         value = item.get(key)
 
                         if value:
-                            industries.append(str(value))
+
+                            industries.append(
+                                str(value)
+                            )
+
                             break
 
             if not industries:
                 return None
 
-            normalized_question = self._normalize_text(question)
+            normalized_question = (
+                self._normalize_text(
+                    question
+                )
+            )
 
             # Exact match
             for industry in industries:
-                normalized_industry = self._normalize_text(industry)
 
-                if normalized_industry in normalized_question:
+                normalized_industry = (
+                    self._normalize_text(
+                        industry
+                    )
+                )
+
+                if (
+                    normalized_industry
+                    in normalized_question
+                ):
+
                     return industry
 
             # Fuzzy match
             words = normalized_question.split()
 
             for industry in industries:
-                normalized_industry = self._normalize_text(industry)
+
+                normalized_industry = (
+                    self._normalize_text(
+                        industry
+                    )
+                )
 
                 score = difflib.SequenceMatcher(
                     None,
@@ -178,28 +244,28 @@ class PSXChatbot:
                     return industry
 
                 for word in words:
+
                     if len(word) >= 4:
-                        word_score = difflib.SequenceMatcher(
-                            None,
-                            normalized_industry,
-                            word,
-                        ).ratio()
+
+                        word_score = (
+                            difflib.SequenceMatcher(
+                                None,
+                                normalized_industry,
+                                word,
+                            ).ratio()
+                        )
 
                         if word_score >= 0.90:
                             return industry
 
         except Exception:
+
             return None
 
         return None
 
     # ---------------------------------------------------------
     # OLD DIRECT ROUTER
-    #
-    # Kept for compatibility with the existing file, but it is
-    # NO LONGER called from _chat_async().
-    #
-    # The LLM is now responsible for selecting MCP tools.
     # ---------------------------------------------------------
 
     async def _detect_direct_tool(
@@ -208,81 +274,123 @@ class PSXChatbot:
         question: str,
     ) -> tuple[str, dict[str, Any]] | None:
 
-        q = self._normalize_text(question)
+        q = self._normalize_text(
+            question
+        )
 
-        industry = await self._find_industry_in_question(
-            session,
-            question,
+        industry = (
+            await self._find_industry_in_question(
+                session,
+                question,
+            )
         )
 
         if (
             "top" in q
             and "change" in q
         ):
+
             arguments = {}
 
             if industry:
                 arguments["industry"] = industry
 
-            return "get_top_change", arguments
+            return (
+                "get_top_change",
+                arguments,
+            )
 
         if (
             "bottom" in q
             and "change" in q
         ):
+
             arguments = {}
 
             if industry:
                 arguments["industry"] = industry
 
-            return "get_bottom_change", arguments
+            return (
+                "get_bottom_change",
+                arguments,
+            )
 
         if (
             "top" in q
             and "volume" in q
         ):
+
             arguments = {}
 
             if industry:
                 arguments["industry"] = industry
 
-            return "get_top_volume", arguments
+            return (
+                "get_top_volume",
+                arguments,
+            )
 
         if (
             "bottom" in q
             and "volume" in q
         ):
+
             arguments = {}
 
             if industry:
                 arguments["industry"] = industry
 
-            return "get_bottom_volume", arguments
+            return (
+                "get_bottom_volume",
+                arguments,
+            )
 
-        if "industry" in q or "industries" in q:
-            return "get_industries", {}
+        if (
+            "industry" in q
+            or "industries" in q
+        ):
 
-        if "symbol" in q or "symbols" in q:
-            return "get_symbols", {}
+            return (
+                "get_industries",
+                {},
+            )
+
+        if (
+            "symbol" in q
+            or "symbols" in q
+        ):
+
+            return (
+                "get_symbols",
+                {},
+            )
 
         if "stock" in q:
+
             arguments = {}
 
             if industry:
                 arguments["industry"] = industry
 
-            return "get_stocks", arguments
+            return (
+                "get_stocks",
+                arguments,
+            )
 
         return None
 
     # ---------------------------------------------------------
-    # OPENAI / GROQ TOOL SCHEMA
+    # OPENAI TOOL SCHEMA
     # ---------------------------------------------------------
 
-    def _openai_tools(self) -> list[dict[str, Any]]:
+    def _openai_tools(
+        self,
+    ) -> list[dict[str, Any]]:
+
         tools: list[dict[str, Any]] = []
 
         for tool in self.tools:
+
             schema = getattr(
                 tool,
                 "inputSchema",
@@ -290,6 +398,7 @@ class PSXChatbot:
             )
 
             if schema is None:
+
                 schema = getattr(
                     tool,
                     "input_schema",
@@ -297,6 +406,7 @@ class PSXChatbot:
                 )
 
             if schema is None:
+
                 schema = {
                     "type": "object",
                     "properties": {},
@@ -308,7 +418,11 @@ class PSXChatbot:
                     "function": {
                         "name": tool.name,
                         "description": (
-                            getattr(tool, "description", None)
+                            getattr(
+                                tool,
+                                "description",
+                                None,
+                            )
                             or f"MCP tool: {tool.name}"
                         ),
                         "parameters": schema,
@@ -322,12 +436,14 @@ class PSXChatbot:
     # MCP RESULT EXTRACTION
     # ---------------------------------------------------------
 
-    def _extract_tool_result(self, result: Any) -> Any:
+    def _extract_tool_result(
+        self,
+        result: Any,
+    ) -> Any:
 
         if result is None:
             return None
 
-        # MCP CallToolResult usually has .content
         content = getattr(
             result,
             "content",
@@ -348,12 +464,20 @@ class PSXChatbot:
             )
 
             if text_value is not None:
+
                 try:
+
                     extracted.append(
-                        json.loads(text_value)
+                        json.loads(
+                            text_value
+                        )
                     )
+
                 except Exception:
-                    extracted.append(text_value)
+
+                    extracted.append(
+                        text_value
+                    )
 
                 continue
 
@@ -366,9 +490,6 @@ class PSXChatbot:
 
     # ---------------------------------------------------------
     # FORMATTER
-    #
-    # Kept for existing compatibility / UI use.
-    # It is NOT used as the final answer in the normal LLM flow.
     # ---------------------------------------------------------
 
     def _format_tool_result(
@@ -380,12 +501,15 @@ class PSXChatbot:
         try:
 
             if tool_name == "get_symbols":
+
                 return format_symbols(data)
 
             if tool_name == "get_industries":
+
                 return format_industries(data)
 
             if tool_name == "get_stocks":
+
                 return format_stock_data(data)
 
             if tool_name in {
@@ -394,25 +518,30 @@ class PSXChatbot:
                 "get_top_volume",
                 "get_bottom_volume",
             }:
+
                 return format_top_bottom(
                     data,
                     tool_name,
                 )
 
         except Exception:
+
             pass
 
         if isinstance(data, str):
             return data
 
         try:
+
             return json.dumps(
                 data,
                 indent=2,
                 ensure_ascii=False,
                 default=str,
             )
+
         except Exception:
+
             return str(data)
 
     # ---------------------------------------------------------
@@ -431,12 +560,15 @@ class PSXChatbot:
         }
 
         try:
+
             return json.dumps(
                 payload,
                 ensure_ascii=False,
                 default=str,
             )
+
         except Exception:
+
             return str(payload)
 
     # ---------------------------------------------------------
@@ -515,21 +647,26 @@ normally without unnecessarily calling PSX tools.
         self,
         client: Any,
         messages: list[dict[str, Any]],
+        model: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
     ) -> Any:
 
         kwargs: dict[str, Any] = {
-            "model": LLM_MODEL,
+            "model": model,
             "messages": messages,
         }
 
         if tools:
+
             kwargs["tools"] = tools
 
             if tool_choice is not None:
+
                 kwargs["tool_choice"] = tool_choice
+
             else:
+
                 kwargs["tool_choice"] = "auto"
 
         return await client.chat.completions.create(
@@ -554,12 +691,16 @@ normally without unnecessarily calling PSX tools.
         if isinstance(arguments, str):
 
             try:
-                parsed = json.loads(arguments)
+
+                parsed = json.loads(
+                    arguments
+                )
 
                 if isinstance(parsed, dict):
                     return parsed
 
             except json.JSONDecodeError:
+
                 return {}
 
         return {}
@@ -579,303 +720,379 @@ normally without unnecessarily calling PSX tools.
         self.last_debug = []
 
         try:
-            
-
 
             async with mcp_session() as session:
 
                 # -----------------------------------------
-                # LOAD ALL AVAILABLE MCP TOOLS
+                # LOAD MCP TOOLS
                 # -----------------------------------------
 
-                await self._load_tools(session)
+                await self._load_tools(
+                    session
+                )
 
                 if not self.tools:
+
                     return (
                         "No PSX MCP tools are currently "
                         "available."
                     )
 
-                openai_tools = self._openai_tools()
+                openai_tools = (
+                    self._openai_tools()
+                )
 
-                    # -----------------------------------------
-                    # LLM CLIENT
-                    # -----------------------------------------
+                # -----------------------------------------
+                # MESSAGE HISTORY
+                # -----------------------------------------
 
-                client = create_llm_client()
-
-                    # -----------------------------------------
-                    # MESSAGE HISTORY
-                    # -----------------------------------------
-
-                messages: list[dict[str, Any]] = [
-                        {
-                            "role": "system",
-                            "content": self._system_prompt(),
-                        }
-                    ]
+                messages: list[
+                    dict[str, Any]
+                ] = [
+                    {
+                        "role": "system",
+                        "content": self._system_prompt(),
+                    }
+                ]
 
                 if history:
-                        
 
-                        for item in history:
+                    for item in history:
 
-                            role = item.get("role")
-                            content = item.get("content")
+                        role = item.get(
+                            "role"
+                        )
 
-                            if role in {
+                        content = item.get(
+                            "content"
+                        )
+
+                        if (
+                            role
+                            in {
                                 "user",
                                 "assistant",
-                            } and content:
+                            }
+                            and content
+                        ):
 
-                                messages.append(
-                                    {
-                                        "role": role,
-                                        "content": content,
-                                    }
-                                )
+                            messages.append(
+                                {
+                                    "role": role,
+                                    "content": content,
+                                }
+                            )
 
                 messages.append(
-                        {
-                            "role": "user",
-                            "content": question,
-                        }
+                    {
+                        "role": "user",
+                        "content": question,
+                    }
+                )
+
+                # -----------------------------------------
+                # LLM CLIENT
+                # -----------------------------------------
+
+                if (
+                    self.llm_config.get(
+                        "provider"
+                    )
+                    == "Custom LLM"
+                ):
+
+                    api_url = (
+                        self.llm_config.get(
+                            "api_url"
+                        )
                     )
 
-                    # -----------------------------------------
-                    # LLM ↔ MCP TOOL LOOP
-                    # -----------------------------------------
+                    api_key = (
+                        self.llm_config.get(
+                            "api_key"
+                        )
+                    )
+
+                    model = (
+                        self.llm_config.get(
+                            "model"
+                        )
+                    )
+
+                    if not api_url:
+
+                        raise RuntimeError(
+                            "Custom LLM API URL is not configured."
+                        )
+
+                    if not api_key:
+
+                        raise RuntimeError(
+                            "Custom LLM API key is not configured."
+                        )
+
+                    if not model:
+
+                        raise RuntimeError(
+                            "Custom LLM model is not configured."
+                        )
+
+                    client = create_llm_client(
+                        api_url=api_url,
+                        api_key=api_key,
+                        model=model,
+                    )
+
+                else:
+
+                    client = create_llm_client()
+
+                    model = LLM_MODEL
+
+                # -----------------------------------------
+                # LLM ↔ MCP TOOL LOOP
+                # -----------------------------------------
 
                 total_tool_calls = 0
 
                 for _iteration in range(
-                        MAX_TOOL_ITERATIONS
-                    ):
+                    MAX_TOOL_ITERATIONS
+                ):
 
-                        response = await self._ask_llm(
-                            client=client,
-                            messages=messages,
-                            tools=openai_tools,
-                            tool_choice="auto",
+                    response = await self._ask_llm(
+                        client=client,
+                        messages=messages,
+                        model=model,
+                        tools=openai_tools,
+                        tool_choice="auto",
+                    )
+
+                    if not response.choices:
+
+                        return (
+                            "I could not generate an answer "
+                            "for that request."
                         )
 
-                        if not response.choices:
-                            return (
-                                "I could not generate an answer "
-                                "for that request."
-                            )
+                    message = (
+                        response.choices[0].message
+                    )
 
-                        message = response.choices[0].message
+                    tool_calls = (
+                        getattr(
+                            message,
+                            "tool_calls",
+                            None,
+                        )
+                        or []
+                    )
 
-                        tool_calls = (
+                    # -------------------------------------
+                    # NO TOOL CALL
+                    # -------------------------------------
+
+                    if not tool_calls:
+
+                        answer = (
                             getattr(
                                 message,
-                                "tool_calls",
+                                "content",
                                 None,
                             )
-                            or []
+                            or ""
+                        ).strip()
+
+                        if answer:
+
+                            return answer
+
+                        return (
+                            "I could not generate a useful "
+                            "answer for that request."
                         )
 
-                        # -------------------------------------
-                        # NO TOOL CALL
-                        # -------------------------------------
+                    # -------------------------------------
+                    # ASSISTANT TOOL CALL MESSAGE
+                    # -------------------------------------
 
-                        if not tool_calls:
+                    assistant_tool_calls = []
 
-                            answer = (
+                    for tool_call in tool_calls:
+
+                        function = (
+                            tool_call.function
+                        )
+
+                        assistant_tool_calls.append(
+                            {
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": function.name,
+                                    "arguments": (
+                                        function.arguments
+                                        or "{}"
+                                    ),
+                                },
+                            }
+                        )
+
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": (
                                 getattr(
                                     message,
                                     "content",
                                     None,
                                 )
                                 or ""
-                            ).strip()
+                            ),
+                            "tool_calls": (
+                                assistant_tool_calls
+                            ),
+                        }
+                    )
 
-                            if answer:
-                                return answer
+                    # -------------------------------------
+                    # EXECUTE MCP TOOLS
+                    # -------------------------------------
+
+                    for tool_call in tool_calls:
+
+                        total_tool_calls += 1
+
+                        if (
+                            total_tool_calls
+                            > MAX_TOOL_CALLS
+                        ):
 
                             return (
-                                "I could not generate a useful "
-                                "answer for that request."
+                                "I stopped the request because "
+                                "too many data-tool calls were "
+                                "required."
                             )
 
-                        # -------------------------------------
-                        # STORE ASSISTANT TOOL CALL MESSAGE
-                        # -------------------------------------
+                        function = (
+                            tool_call.function
+                        )
 
-                        assistant_tool_calls = []
+                        tool_name = (
+                            function.name
+                        )
 
-                        for tool_call in tool_calls:
+                        arguments = (
+                            self._parse_tool_arguments(
+                                function.arguments
+                            )
+                        )
 
-                            function = tool_call.function
+                        # ---------------------------------
+                        # VALIDATE MCP TOOL
+                        # ---------------------------------
 
-                            assistant_tool_calls.append(
+                        if (
+                            tool_name
+                            not in self.tool_map
+                        ):
+
+                            tool_output = json.dumps(
                                 {
-                                    "id": tool_call.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": function.name,
-                                        "arguments": (
-                                            function.arguments
-                                            or "{}"
-                                        ),
-                                    },
+                                    "error": (
+                                        f"MCP tool "
+                                        f"'{tool_name}' "
+                                        "is not available."
+                                    )
                                 }
                             )
 
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": (
-                                    getattr(
-                                        message,
-                                        "content",
-                                        None,
+                        else:
+
+                            try:
+
+                                result = (
+                                    await self._call_tool(
+                                        session,
+                                        tool_name,
+                                        arguments,
                                     )
-                                    or ""
-                                ),
-                                "tool_calls": (
-                                    assistant_tool_calls
-                                ),
-                            }
-                        )
-
-                        # -------------------------------------
-                        # EXECUTE MCP TOOLS
-                        # -------------------------------------
-
-                        for tool_call in tool_calls:
-
-                            total_tool_calls += 1
-
-                            if (
-                                total_tool_calls
-                                > MAX_TOOL_CALLS
-                            ):
-                                return (
-                                    "I stopped the request because "
-                                    "too many data-tool calls were "
-                                    "required."
                                 )
 
-                            function = tool_call.function
-
-                            tool_name = function.name
-
-                            arguments = (
-                                self._parse_tool_arguments(
-                                    function.arguments
+                                data = (
+                                    self._extract_tool_result(
+                                        result
+                                    )
                                 )
-                            )
 
-                            # -----------------------------
-                            # Validate actual MCP tool
-                            # -----------------------------
+                                # Send raw MCP data to LLM
+                                tool_output = (
+                                    self._tool_result_for_llm(
+                                        tool_name,
+                                        data,
+                                    )
+                                )
 
-                            if (
-                                tool_name
-                                not in self.tool_map
-                            ):
+                            except Exception as exc:
 
-                                tool_output = json.dumps(
+                                self.last_debug.append(
                                     {
-                                        "error": (
-                                            f"MCP tool "
-                                            f"'{tool_name}' "
-                                            "is not available."
-                                        )
+                                        "tool": tool_name,
+                                        "arguments": arguments,
+                                        "success": False,
+                                        "error": str(exc),
                                     }
                                 )
 
-                            else:
+                                tool_output = json.dumps(
+                                    {
+                                        "tool": tool_name,
+                                        "error": (
+                                            "The MCP tool "
+                                            "could not retrieve "
+                                            "the requested data."
+                                        ),
+                                    },
+                                    ensure_ascii=False,
+                                )
 
-                                try:
+                        # ---------------------------------
+                        # RETURN MCP RESULT TO LLM
+                        # ---------------------------------
 
-                                    result = (
-                                        await self._call_tool(
-                                            session,
-                                            tool_name,
-                                            arguments,
-                                        )
-                                    )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": (
+                                    tool_call.id
+                                ),
+                                "content": tool_output,
+                            }
+                        )
 
-                                    data = (
-                                        self._extract_tool_result(
-                                            result
-                                        )
-                                    )
-
-                                    # ---------------------------------
-                                    # IMPORTANT:
-                                    # Send raw/complete MCP data back
-                                    # to LLM instead of returning the
-                                    # formatter directly to the user.
-                                    # ---------------------------------
-
-                                    tool_output = (
-                                        self._tool_result_for_llm(
-                                            tool_name,
-                                            data,
-                                        )
-                                    )
-
-                                except Exception as exc:
-
-                                    self.last_debug.append(
-                                        {
-                                            "tool": tool_name,
-                                            "arguments": arguments,
-                                            "success": False,
-                                            "error": str(exc),
-                                        }
-                                    )
-
-                                    tool_output = json.dumps(
-                                        {
-                                            "tool": tool_name,
-                                            "error": (
-                                                "The MCP tool "
-                                                "could not retrieve "
-                                                "the requested data."
-                                            ),
-                                        },
-                                        ensure_ascii=False,
-                                    )
-
-                            # -----------------------------
-                            # Return MCP result to LLM
-                            # -----------------------------
-
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": (
-                                        tool_call.id
-                                    ),
-                                    "content": tool_output,
-                                }
-                            )
-
-                    # -------------------------------------------------
-                    # MAX ITERATIONS
-                    # -------------------------------------------------
+                # -----------------------------------------
+                # MAX ITERATIONS
+                # -----------------------------------------
 
                 return (
-                        "I could not complete the request within "
-                        "the allowed data retrieval steps."
-                    )
+                    "I could not complete the request within "
+                    "the allowed data retrieval steps."
+                )
 
         except Exception as exc:
 
             self.last_debug.append(
                 {
                     "success": False,
-                    "error": f"{type(exc).__name__}: {exc!r}",
+                    "error": (
+                        f"{type(exc).__name__}: "
+                        f"{exc!r}"
+                    ),
                 }
             )
 
             return (
-                f"DEBUG ERROR: {type(exc).__name__}: {exc!r}"
+                f"DEBUG ERROR: "
+                f"{type(exc).__name__}: {exc!r}"
             )
 
     # ---------------------------------------------------------
@@ -903,9 +1120,12 @@ normally without unnecessarily calling PSX tools.
 def ask_chatbot(
     question: str,
     history: list[dict[str, Any]] | None = None,
+    llm_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 
-    chatbot = PSXChatbot()
+    chatbot = PSXChatbot(
+        llm_config=llm_config,
+    )
 
     answer = chatbot.chat(
         question,
@@ -918,3 +1138,4 @@ def ask_chatbot(
         "arguments": chatbot.last_arguments,
         "debug": chatbot.last_debug,
     }
+
