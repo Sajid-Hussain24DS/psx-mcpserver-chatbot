@@ -1122,20 +1122,11 @@ def ask_chatbot(
     history: list[dict[str, Any]] | None = None,
     llm_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-
-    chatbot = PSXChatbot(
-        llm_config=llm_config,
-    )
-
-    answer = chatbot.chat(
-        question,
-        history,
-    )
-
+    chatbot = PSXChatbot(llm_config=llm_config)
+    answer = chatbot.chat(question, history)
     return {
         "answer": answer,
         "tool": chatbot.last_tool,
         "arguments": chatbot.last_arguments,
         "debug": chatbot.last_debug,
     }
-
