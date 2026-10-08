@@ -660,7 +660,17 @@ with st.sidebar:
         # -----------------------------------------------------------
         # DEFAULT GROQ
         # -----------------------------------------------------------
-
+        # Keep the active LLM configuration synced with the selected provider.
+        if provider != st.session_state.llm_config.get("provider"):
+            if provider == "Default Groq":
+                st.session_state.llm_config = {
+                    "provider": "Default Groq",
+                    "api_url": "",
+                    "api_key": "",
+                    "model": "",
+                }
+            else:
+                st.session_state.llm_config["provider"] = "Custom LLM"
         if provider == "Default Groq":
 
             st.caption(
@@ -985,9 +995,69 @@ for message in messages:
 # CHAT INPUT
 # -------------------------------------------------------------------
 
+custom_llm_selected = (
+    st.session_state.get("llm_provider", "Default Groq")
+    == "Custom LLM"
+)
+
+custom_llm_ready = (
+    not custom_llm_selected
+    or all(
+        str(st.session_state.llm_config.get(field, "")).strip()
+        for field in ("api_url", "api_key", "model")
+    )
+)
+
+  
 question = st.chat_input(
     "Ask about PSX stocks, industries, change, or volume..."
 )
+ 
+if not custom_llm_ready:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stChatInput"] {
+            position: relative !important;
+        }
+
+        div[data-testid="stChatInput"]::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            z-index: 9999;
+            cursor: not-allowed;
+            background: transparent;
+        }
+
+        div[data-testid="stChatInput"]::before {
+            content: "Please configure your Custom LLM first.";
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: #222;
+            color: white;
+            padding: 7px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 10000;
+            transition: opacity 0.15s ease;
+        }
+
+        div[data-testid="stChatInput"]:hover::before {
+            opacity: 1;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Do not process chat input
+    question = None
 
 
 # -------------------------------------------------------------------
